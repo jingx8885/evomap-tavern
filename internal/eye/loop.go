@@ -289,6 +289,15 @@ func (e *Eyes) emit(s Sight) {
 	e.opt.OnSight(s)
 }
 
+// ProbeScreen captures one desktop JPEG and returns its size. Used by doctor.
+func ProbeScreen() (int, error) {
+	raw, err := captureScreenJPEG(maxScreenEdge)
+	if err != nil {
+		return 0, err
+	}
+	return len(raw), nil
+}
+
 func (e *Eyes) log(format string, args ...any) {
 	if e.opt.LogFn == nil {
 		return

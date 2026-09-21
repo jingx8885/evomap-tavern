@@ -19,6 +19,7 @@ import (
 	"github.com/jingx8885/lov-evo/internal/avatar"
 	"github.com/jingx8885/lov-evo/internal/config"
 	"github.com/jingx8885/lov-evo/internal/desk"
+	"github.com/jingx8885/lov-evo/internal/eye"
 	"github.com/jingx8885/lov-evo/internal/jev"
 	"github.com/jingx8885/lov-evo/internal/judge"
 	"github.com/jingx8885/lov-evo/internal/livevoice"
@@ -73,6 +74,7 @@ func usage() {
 
 Commands:
   run     start the duplex voice loop (WebRTC uplink + WS events)
+          flags include -vision=both|camera|screen|off
   speak   one-shot TTS through the speakable channel, writes a WAV
   probe   connectivity check: call create, session.started, RTP echo
   judge   judge one text with Jev (no voice)
@@ -129,6 +131,9 @@ func cmdRun(args []string) int {
 	noBrowser := fs.Bool("no-browser", false, "do not open the Live2D viewer")
 	say := fs.String("say", "", "speak this text once after the session starts")
 	quitAfter := fs.Duration("quit-after", 0, "exit after this duration (0 = until Ctrl+C / /quit)")
+	vision := fs.String("vision", "both", "eyes: both, camera, screen, or off")
+	visionModel := fs.String("vision-model", config.DefaultVisionModel, "multimodal captioner")
+	visionEvery := fs.Duration("vision-every", 2*time.Second, "how often to sample camera/screen")
 	fs.Parse(args)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -151,6 +156,9 @@ func cmdRun(args []string) int {
 		Live2DDir:    *live2dDir,
 		OpenViewer:   !*noBrowser,
 		Say:          *say,
+		Vision:       *vision,
+		VisionModel:  *visionModel,
+		VisionEvery:  *visionEvery,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -485,6 +493,11 @@ func cmdDoctor(args []string) int {
 		fmt.Println("sense:", err)
 	} else {
 		fmt.Println("sense:", root)
+	}
+	if n, err := eye.ProbeScreen(); err != nil {
+		fmt.Println("screen:", err)
+	} else {
+		fmt.Printf("screen: jpeg %d bytes\n", n)
 	}
 	return 0
 }
