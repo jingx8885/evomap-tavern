@@ -317,8 +317,6 @@ func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
 			case livevoice.EventClosed:
 				opt.log("session closed: %v", ev.Err)
 				return pumpResult{kind: pumpDrop, err: ev.Err}
-				opt.log("session closed: %v", ev.Err)
-				return pumpResult{kind: pumpDrop, err: ev.Err}
 			}
 		case line := <-cmds:
 			if handleCommand(ctx, line, p, pl, sess, opt, jevClient, llmClient) {
