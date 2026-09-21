@@ -1,6 +1,7 @@
 /runs/
 /*.wav
 /tavernbot
-/tavernbot.exe
+/*.exe
+*.exe~
 *.log
 .DS_Store
