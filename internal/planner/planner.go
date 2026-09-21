@@ -76,6 +76,13 @@ func (pl *Planner) State() Plan {
 	return pl.plan
 }
 
+// Refining reports whether an async LLM refine is in flight.
+func (pl *Planner) Refining() bool {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	return pl.refining
+}
+
 // SetNote overrides the plan note (e.g. the /goal command).
 func (pl *Planner) SetNote(note string) {
 	pl.mu.Lock()

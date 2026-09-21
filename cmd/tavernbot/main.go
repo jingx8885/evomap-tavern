@@ -284,7 +284,10 @@ func cmdPlan(args []string) int {
 	mem := memory.New(8)
 	mem.Add(memory.Turn{Speaker: "user", Text: "Let's plan something together."})
 	pl.Tick(context.Background(), mem, true)
-	time.Sleep(2 * time.Second)
+	deadline := time.Now().Add(45 * time.Second)
+	for pl.Refining() && time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+	}
 	fmt.Println("note:", pl.Current())
 	return 0
 }

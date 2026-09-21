@@ -19,7 +19,7 @@ const DefaultJevModel = "jev-latest"
 const DefaultLiveModel = "gpt-live-1-boulder-alpha"
 
 // DefaultPlannerModel is the LLM used for long-term planning.
-const DefaultPlannerModel = "gpt-4o-mini"
+const DefaultPlannerModel = "gpt-5.6-luna"
 
 // ResolveBaseURL returns the OpenAI-compatible /v1 root:
 // explicit value > NEW_API_BASE_URL > default. It normalizes a bare host
