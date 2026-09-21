@@ -51,6 +51,8 @@ func main() {
 		os.Exit(cmdCtxProbe(args))
 	case "live2d":
 		os.Exit(cmdLive2D(args))
+	case "loopprobe":
+		os.Exit(cmdLoopProbe(args))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", cmd)
 		usage()
@@ -70,6 +72,7 @@ Commands:
   doctor    local environment check (no network)
   ctxprobe  experiment with session.context.append channels
   live2d    serve the Haru viewer (Jev frames + lip sync over WebSocket)
+  loopprobe closed-loop: inject speech uplink, wait for transcript + reply
 `)
 }
 
@@ -518,4 +521,168 @@ func cycleMouthDemo(ctx context.Context, hub *avatar.Hub) {
 			hub.Mouth(audio.MouthEnvelope(time.Since(t0).Seconds()))
 		}
 	}
+}
+
+func cmdLoopProbe(args []string) int {
+	fs := flag.NewFlagSet("loopprobe", flag.ExitOnError)
+	baseURL, personaPath, key, verbose := commonFlags(fs)
+	wav := fs.String("wav", "", "s16le WAV to inject as user speech")
+	timeout := fs.Duration("timeout", 25*time.Second, "max wait after inject")
+	fs.Parse(args)
+	if strings.TrimSpace(*wav) == "" {
+		fmt.Fprintln(os.Stderr, "--wav required")
+		return 2
+	}
+	pcm, rate, ch, err := audio.ReadWAV(*wav)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	ulaw := audio.PCMToUplinkUlaw(pcm, rate, ch)
+	frames := audio.UlawFrames(ulaw)
+	if len(frames) == 0 {
+		fmt.Fprintln(os.Stderr, "wav produced no uplink frames")
+		return 1
+	}
+	silence := bytes.Repeat([]byte{audio.SilenceByte}, audio.PCMUFrameBytes)
+	for i := 0; i < 50; i++ {
+		frames = append(frames, append([]byte(nil), silence...))
+	}
+	fmt.Printf("inject wav=%s rate=%d ch=%d pcm=%d ulaw_frames=%d rms=%.4f\n",
+		*wav, rate, ch, len(pcm), len(frames), audio.UlawRMS(ulaw))
+
+	p := mustPersona(*personaPath)
+	ctx := context.Background()
+	sess, err := livevoice.ConnectScripted(ctx, config.ResolveBaseURL(*baseURL), mustKey(*key),
+		p.BaseInstructions(), p.Voice)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer sess.Close()
+	sess.Verbose = *verbose
+	offer, answer := sess.SDPAudio()
+	fmt.Printf("sdp offer: %s\n", offer)
+	fmt.Printf("sdp answer: %s\n", answer)
+	wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	if err := sess.WaitStarted(wctx); err != nil {
+		cancel()
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	cancel()
+	echoDeadline := time.Now().Add(6 * time.Second)
+	for sess.EchoCount() < 5 && time.Now().Before(echoDeadline) {
+		select {
+		case ev := <-sess.Events():
+			if ev.Kind == livevoice.EventError {
+				fmt.Printf("error: %v\n", ev.Err)
+			}
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	fmt.Printf("pre-inject echo=%d\n", sess.EchoCount())
+	time.Sleep(400 * time.Millisecond)
+	if err := sess.InjectUlaw(frames); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	fmt.Println("injected; waiting for turn")
+	minWait := time.Now().Add(time.Duration(len(frames))*audio.PCMUFrameDur + 4*time.Second)
+
+	deadline := time.Now().Add(*timeout)
+	var user, assistant string
+	gotTurn := false
+	kinds := map[string]int{}
+	replyOK := func() bool {
+		u, a := strings.TrimSpace(user), strings.TrimSpace(assistant)
+		if u == "" || a == "" {
+			return false
+		}
+		if strings.Contains(u, a) || strings.Contains(a, u) {
+			return false
+		}
+		return len([]rune(u)) >= 6 && len([]rune(a)) >= 6
+	}
+	lockUser := false
+	for time.Now().Before(deadline) {
+		select {
+		case ev := <-sess.Events():
+			kinds[ev.Kind]++
+			switch ev.Kind {
+			case livevoice.EventTranscript:
+				fmt.Printf("transcript speaker=%s text=%q\n", ev.Speaker, ev.Text)
+				if ev.Speaker == "user" && strings.TrimSpace(ev.Text) != "" && !lockUser {
+					if len([]rune(ev.Text)) >= len([]rune(user)) {
+						user = ev.Text
+					}
+					if len([]rune(user)) >= 8 {
+						lockUser = true
+					}
+				}
+				if ev.Speaker == "assistant" && strings.TrimSpace(ev.Text) != "" {
+					if len([]rune(ev.Text)) >= len([]rune(assistant)) {
+						assistant = ev.Text
+					}
+				}
+			case livevoice.EventTurnDone:
+				if strings.TrimSpace(ev.Text) != "" && !lockUser {
+					user = ev.Text
+					if len([]rune(user)) >= 8 {
+						lockUser = true
+					}
+				}
+				if a, _ := ev.Usage["assistant"].(string); strings.TrimSpace(a) != "" && len([]rune(a)) >= len([]rune(assistant)) {
+					assistant = a
+				}
+				gotTurn = user != "" || assistant != ""
+				fmt.Printf("turn.done user=%q assistant=%q\n", user, assistant)
+			case livevoice.EventError:
+				fmt.Printf("error: %v\n", ev.Err)
+			case livevoice.EventClosed:
+				fmt.Printf("closed: %v\n", ev.Err)
+				goto done
+			}
+		case <-time.After(300 * time.Millisecond):
+		}
+		if time.Now().After(minWait) && replyOK() {
+			gotTurn = true
+			break
+		}
+	}
+done:
+	pcmOut := sess.PCM()
+	mouth := 0.0
+	if len(pcmOut) > 1920 {
+		mouth = audio.MouthOpen(pcmOut[len(pcmOut)-1920:])
+	}
+	result := map[string]any{
+		"got_turn":   gotTurn,
+		"user":       user,
+		"assistant":  assistant,
+		"pcm_bytes":  len(pcmOut),
+		"seconds":    float64(len(pcmOut)) / (audio.DownlinkRate * 2),
+		"mouth_tail": mouth,
+		"echo":       sess.EchoCount(),
+		"events":     kinds,
+	}
+	if strings.TrimSpace(user) != "" {
+		jc := jev.NewClient(config.ResolveBaseURL(*baseURL), mustKey(*key), "")
+		mem := memory.New(8)
+		if jd, jerr := judge.JudgeTurn(ctx, jc, p, mem, user); jerr != nil {
+			result["jev"] = jerr.Error()
+		} else {
+			result["jev_emotion"] = jd.Emotion
+			result["jev_valence"] = jd.Valence
+			result["jev_arousal"] = jd.Arousal
+			result["jev_engage"] = jd.Engagement
+			result["jev_mode"] = judge.DecideMode(jd, mem.Affect(), p.Judge.SafetyThresh, "")
+		}
+	}
+	enc, _ := json.MarshalIndent(result, "", "  ")
+	fmt.Println(string(enc))
+	if strings.TrimSpace(user) == "" || strings.TrimSpace(assistant) == "" {
+		return 1
+	}
+	return 0
 }

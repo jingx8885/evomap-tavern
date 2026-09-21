@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 
@@ -84,7 +85,12 @@ type Session struct {
 	onPCMMu       sync.Mutex
 	onPCM         func([]byte)
 	echoN         atomic.Int64
+	writeErrs     atomic.Int64
 	duckMicUntil  atomic.Int64
+	inject        chan []byte
+	skipMic       bool
+	offerAudio    string
+	answerAudio   string
 
 	Verbose bool
 }
@@ -92,6 +98,16 @@ type Session struct {
 // Connect establishes WebRTC + WS and returns a live session.
 // instructions becomes the session-level persona prompt.
 func Connect(ctx context.Context, baseURL, apiKey, instructions, voice string) (*Session, error) {
+	return connect(ctx, baseURL, apiKey, instructions, voice, false)
+}
+
+// ConnectScripted is Connect without microphone capture. Uplink is
+// silence plus optional InjectUlaw frames (for closed-loop ASR tests).
+func ConnectScripted(ctx context.Context, baseURL, apiKey, instructions, voice string) (*Session, error) {
+	return connect(ctx, baseURL, apiKey, instructions, voice, true)
+}
+
+func connect(ctx context.Context, baseURL, apiKey, instructions, voice string, skipMic bool) (*Session, error) {
 	if voice == "" {
 		voice = "cove"
 	}
@@ -100,16 +116,18 @@ func Connect(ctx context.Context, baseURL, apiKey, instructions, voice string) (
 		apiKey:  apiKey,
 		model:   config.DefaultLiveModel,
 		voice:   voice,
-		events:  make(chan Event, 256),
+		events:  make(chan Event, 2048),
 		started: make(chan struct{}),
 		player:  audio.NewPlayer(),
+		inject:  make(chan []byte, 1024),
+		skipMic: skipMic,
 	}
 	inner, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	pc, err := newPCMUPeerConnection()
 	if err != nil {
-		return nil, fmt.Errorf("peer connection: %w", err)
+		return nil, err
 	}
 	s.pc = pc
 
@@ -178,11 +196,13 @@ func Connect(ctx context.Context, baseURL, apiKey, instructions, voice string) (
 	if !strings.HasSuffix(sdp, "\n") {
 		sdp += "\n"
 	}
+	s.offerAudio = sdpAudioLines(sdp)
 	callID, answer, err := s.postCall(sdp, instructions)
 	if err != nil {
 		pc.Close()
 		return nil, err
 	}
+	s.answerAudio = sdpAudioLines(answer)
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer, SDP: answer,
 	}); err != nil {
@@ -203,6 +223,33 @@ func Connect(ctx context.Context, baseURL, apiKey, instructions, voice string) (
 	go s.wsReader(inner)
 	go s.uplink(inner)
 	return s, nil
+}
+
+// newPCMUPeerConnection negotiates only G.711 μ-law PT 0. The default
+// MediaEngine prefers Opus; writing PCMU into an Opus sender is received
+// as RTP (echo) but never looks like speech to ASR.
+func newPCMUPeerConnection() (*webrtc.PeerConnection, error) {
+	m := &webrtc.MediaEngine{}
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:  webrtc.MimeTypePCMU,
+			ClockRate: 8000,
+			Channels:  1,
+		},
+		PayloadType: 0,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		return nil, fmt.Errorf("register PCMU: %w", err)
+	}
+	ir := &interceptor.Registry{}
+	if err := webrtc.RegisterDefaultInterceptors(m, ir); err != nil {
+		return nil, fmt.Errorf("interceptors: %w", err)
+	}
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithInterceptorRegistry(ir))
+	pc, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		return nil, fmt.Errorf("peer connection: %w", err)
+	}
+	return pc, nil
 }
 
 // postCall does POST /realtime/calls (multipart sdp + session).
@@ -258,34 +305,43 @@ const duckMouthMin = 0.18
 // uplink streams PCMU frames at 20ms cadence: mic frames when available,
 // silence otherwise (the gateway needs active RTP to play speakable text).
 func (s *Session) uplink(ctx context.Context) {
-	micFrames, micStop, err := audio.OpenMic(audio.PCMUUplinkRate)
-	if err != nil {
-		s.logf("uplink: %v", err)
-		s.emit(Event{Kind: EventWarning, Err: err})
-	} else {
-		s.logf("uplink: microphone %s", audio.MicFormat())
-	}
-	s.micStop = micStop
 	silenceFrame := bytes.Repeat([]byte{audio.SilenceByte}, audio.PCMUFrameBytes)
 	write := func(frame []byte) {
 		if len(frame) == 0 {
 			frame = silenceFrame
 		}
-		_ = s.track.WriteSample(media.Sample{
+		if err := s.track.WriteSample(media.Sample{
 			Data:     frame,
 			Duration: audio.PCMUFrameDur,
-		})
+		}); err != nil {
+			n := s.writeErrs.Add(1)
+			if s.Verbose && n <= 3 {
+				s.logf("uplink write: %v", err)
+			}
+		}
 	}
-	if micFrames != nil {
-		s.uplinkMic(ctx, micFrames, write, silenceFrame)
-		return
+	if !s.skipMic {
+		micFrames, micStop, err := audio.OpenMic(audio.PCMUUplinkRate)
+		if err != nil {
+			s.logf("uplink: %v", err)
+			s.emit(Event{Kind: EventWarning, Err: err})
+		} else {
+			s.logf("uplink: microphone %s", audio.MicFormat())
+		}
+		s.micStop = micStop
+		if micFrames != nil {
+			s.uplinkMic(ctx, micFrames, write, silenceFrame)
+			return
+		}
+	} else {
+		s.logf("uplink: scripted (no mic)")
 	}
 
-	stop := make(chan struct{})
-	defer close(stop)
-	silence := audio.SilenceFrames(stop)
 	ticker := time.NewTicker(audio.PCMUFrameDur)
 	defer ticker.Stop()
+	var n int
+	var maxRMS float64
+	lastLog := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
@@ -293,12 +349,22 @@ func (s *Session) uplink(ctx context.Context) {
 		case <-ticker.C:
 			var frame []byte
 			select {
-			case f := <-silence:
+			case f := <-s.inject:
 				frame = f
 			default:
 				frame = silenceFrame
 			}
+			if r := audio.UlawRMS(frame); r > maxRMS {
+				maxRMS = r
+			}
+			n++
 			write(frame)
+			if s.Verbose && time.Since(lastLog) >= 2*time.Second {
+				s.logf("uplink: frames=%d max_rms=%.4f echo=%d write_err=%d queued=%d",
+					n, maxRMS, s.echoN.Load(), s.writeErrs.Load(), len(s.inject))
+				n, maxRMS = 0, 0
+				lastLog = time.Now()
+			}
 		}
 	}
 }
@@ -387,6 +453,8 @@ func (s *Session) handleEvent(data []byte) {
 	if s.Verbose && etype != "session.output_audio.delta" && etype != "session.input_audio.append" {
 		if tx := transcriptText(ev); tx != "" {
 			s.logf("event %s text=%q", etype, clipRunes(tx, 80))
+		} else if etype == "session.started" {
+			s.logf("event %s %s", etype, clipRunes(string(data), 400))
 		} else {
 			s.logf("event %s", etype)
 		}
@@ -488,14 +556,15 @@ func (s *Session) finishTurn(role, eventText string) {
 }
 
 func isTranscriptEvent(t string) bool {
-	switch t {
-	case "output_transcript.added", "output_transcript.delta",
-		"input_transcript.added", "input_transcript.delta",
-		"turn.delta":
-		return true
-	default:
-		return strings.Contains(t, "transcription")
+	if strings.Contains(t, "input_audio") {
+		return false
 	}
+	// turn.delta duplicates input/output_transcript.added and often
+	// has no role, which used to append assistant speech onto the user.
+	if t == "turn.delta" {
+		return false
+	}
+	return strings.Contains(t, "transcript")
 }
 
 func eventRole(ev map[string]any) string {
@@ -568,6 +637,12 @@ func detectSpeaker(etype string, ev map[string]any) string {
 	if strings.Contains(etype, "input") {
 		return "user"
 	}
+	if strings.Contains(etype, "output") {
+		return "assistant"
+	}
+	if etype == "turn.delta" {
+		return "user"
+	}
 	return "assistant"
 }
 
@@ -596,6 +671,43 @@ func (s *Session) WaitStarted(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// EchoCount is how many session.input_audio.append echoes the gateway sent.
+func (s *Session) EchoCount() int64 {
+	return s.echoN.Load()
+}
+
+// SDPAudio returns negotiated audio lines from the local offer and remote answer.
+func (s *Session) SDPAudio() (offer, answer string) {
+	return s.offerAudio, s.answerAudio
+}
+
+func sdpAudioLines(sdp string) string {
+	var parts []string
+	for _, line := range strings.Split(sdp, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "m=audio") || strings.HasPrefix(line, "a=rtpmap:") || strings.HasPrefix(line, "a=fmtp:") {
+			parts = append(parts, line)
+		}
+	}
+	return strings.Join(parts, " | ")
+}
+
+// InjectUlaw queues 20ms PCMU frames onto the uplink (scripted ASR tests).
+func (s *Session) InjectUlaw(frames [][]byte) error {
+	if s.inject == nil {
+		return fmt.Errorf("uplink inject not ready")
+	}
+	for _, f := range frames {
+		cp := append([]byte(nil), f...)
+		select {
+		case s.inject <- cp:
+		case <-time.After(5 * time.Second):
+			return fmt.Errorf("inject stalled")
+		}
+	}
+	return nil
 }
 
 // Speak makes the assistant say text verbatim via the speakable channel.

@@ -137,6 +137,68 @@ func WriteWAV(path string, pcm []byte, sampleRate int) error {
 	return os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
+// ReadWAV reads a PCM s16le WAVE file.
+func ReadWAV(path string) (pcm []byte, sampleRate, channels int, err error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if len(raw) < 44 || string(raw[0:4]) != "RIFF" || string(raw[8:12]) != "WAVE" {
+		return nil, 0, 0, fmt.Errorf("not a WAVE file")
+	}
+	off := 12
+	var bits int
+	for off+8 <= len(raw) {
+		id := string(raw[off : off+4])
+		n := int(binary.LittleEndian.Uint32(raw[off+4:]))
+		off += 8
+		if off+n > len(raw) {
+			return nil, 0, 0, fmt.Errorf("truncated %s chunk", id)
+		}
+		switch id {
+		case "fmt ":
+			if n < 16 {
+				return nil, 0, 0, fmt.Errorf("bad fmt chunk")
+			}
+			format := binary.LittleEndian.Uint16(raw[off:])
+			if format != 1 {
+				return nil, 0, 0, fmt.Errorf("need PCM wav, format=%d", format)
+			}
+			channels = int(binary.LittleEndian.Uint16(raw[off+2:]))
+			sampleRate = int(binary.LittleEndian.Uint32(raw[off+4:]))
+			bits = int(binary.LittleEndian.Uint16(raw[off+14:]))
+		case "data":
+			if bits != 16 {
+				return nil, 0, 0, fmt.Errorf("need 16-bit pcm, got %d", bits)
+			}
+			pcm = append([]byte(nil), raw[off:off+n]...)
+			return pcm, sampleRate, channels, nil
+		}
+		off += n
+		if n%2 == 1 {
+			off++
+		}
+	}
+	return nil, 0, 0, fmt.Errorf("no data chunk")
+}
+
+// UlawFrames splits mu-law bytes into 20ms uplink frames.
+func UlawFrames(ulaw []byte) [][]byte {
+	var out [][]byte
+	for len(ulaw) >= PCMUFrameBytes {
+		f := make([]byte, PCMUFrameBytes)
+		copy(f, ulaw[:PCMUFrameBytes])
+		ulaw = ulaw[PCMUFrameBytes:]
+		out = append(out, f)
+	}
+	if len(ulaw) > 0 {
+		f := bytes.Repeat([]byte{SilenceByte}, PCMUFrameBytes)
+		copy(f, ulaw)
+		out = append(out, f)
+	}
+	return out
+}
+
 // Player streams downlink PCM to speakers.
 // Backends: winmm (Windows), afplay (macOS), aplay/ffplay (Linux).
 // Chunked file playback is a fallback; winmm streams s16le 24kHz directly.

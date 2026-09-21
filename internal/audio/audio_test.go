@@ -48,6 +48,13 @@ func TestWriteWAV(t *testing.T) {
 	if string(raw[:4]) != "RIFF" || string(raw[8:12]) != "WAVE" {
 		t.Fatal("bad wav header")
 	}
+	pcm, rate, ch, err := ReadWAV(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rate != 24000 || ch != 1 || len(pcm) != 4 {
+		t.Fatalf("roundtrip rate=%d ch=%d n=%d", rate, ch, len(pcm))
+	}
 }
 
 func TestMouthOpenSilence(t *testing.T) {

@@ -65,8 +65,14 @@ func TestDetectSpeakerFromType(t *testing.T) {
 	if g := detectSpeaker("output_transcript.added", map[string]any{}); g != "assistant" {
 		t.Fatalf("assistant %q", g)
 	}
+	if g := detectSpeaker("turn.delta", map[string]any{}); g != "user" {
+		t.Fatalf("turn.delta default %q", g)
+	}
 	if g := detectSpeaker("turn.delta", map[string]any{"role": "user"}); g != "user" {
 		t.Fatalf("role %q", g)
+	}
+	if g := detectSpeaker("session.output_transcript.delta", map[string]any{}); g != "assistant" {
+		t.Fatalf("output %q", g)
 	}
 }
 
@@ -78,8 +84,14 @@ func TestTranscriptTextNested(t *testing.T) {
 }
 
 func TestIsTranscriptEvent(t *testing.T) {
-	if !isTranscriptEvent("turn.delta") || !isTranscriptEvent("input_transcript.added") {
+	if !isTranscriptEvent("input_transcript.added") {
 		t.Fatal("expected transcript events")
+	}
+	if !isTranscriptEvent("session.input_transcript.delta") || !isTranscriptEvent("session.output_transcript.delta") {
+		t.Fatal("expected gpt-live transcript events")
+	}
+	if isTranscriptEvent("turn.delta") {
+		t.Fatal("turn.delta is a duplicate, not a transcript source")
 	}
 	if isTranscriptEvent("session.input_audio.append") {
 		t.Fatal("audio append is not transcript")
