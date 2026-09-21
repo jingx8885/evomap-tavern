@@ -29,7 +29,9 @@
     valence: document.getElementById("valence"),
     arousal: document.getElementById("arousal"),
     engagement: document.getElementById("engagement"),
+    needLlm: document.getElementById("need-llm"),
     mouth: document.getElementById("mouth"),
+    self: document.getElementById("self"),
   };
   const mouthBar = document.querySelector("#mouth-bar > span");
   const unmuteBtn = document.getElementById("unmute");
@@ -37,10 +39,12 @@
   let app;
   let model;
   let lastMode = "";
+  let lastExpression = "";
   let lastDrive = { params: {} };
   let mouthTarget = 0;
   let mouth = 0;
   let lastLipsyncAt = 0;
+  let mouthParamHooked = false;
 
   function setStatus(text) {
     statusEl.textContent = text;
@@ -71,6 +75,11 @@
     return model && model.internalModel && model.internalModel.coreModel;
   }
 
+  function expressionManager() {
+    const im = model && model.internalModel;
+    return im && im.motionManager && im.motionManager.expressionManager;
+  }
+
   function setParam(core, id, value) {
     if (!core || !id) return;
     const v = Number(value);
@@ -84,25 +93,39 @@
     }
   }
 
-  function writeMouthParam(v) {
+  function addParam(core, id, value) {
+    if (!core || !id) return;
+    const v = Number(value);
+    if (!Number.isFinite(v) || v === 0) return;
+    if (typeof core.addParameterValueById === "function") {
+      core.addParameterValueById(id, v);
+      return;
+    }
+    setParam(core, id, v);
+  }
+
+  function mouthIds() {
+    const ids = ["ParamMouthOpenY"];
     const im = model && model.internalModel;
-    const core = im && im.coreModel;
+    const fromSettings = im && im.settings && im.settings.lipSyncIds;
+    const fromMotion = im && im.motionManager && im.motionManager.lipSyncIds;
+    for (const id of [].concat(fromSettings || [], fromMotion || [])) {
+      if (id && !ids.includes(id)) ids.push(id);
+    }
+    return ids;
+  }
+
+  let hookMouth = null;
+  let hookIndex = null;
+
+  function writeMouthParam(v) {
+    const core = coreModel();
     if (!core) return;
-    if (im) {
-      im.lipSync = true;
-      im.lipSyncValue = v;
-    }
-    const ids = ["ParamMouthOpenY", "ParamA"];
-    if (im.settings && Array.isArray(im.settings.lipSyncIds)) {
-      for (const id of im.settings.lipSyncIds) ids.push(id);
-    }
-    for (const id of ids) setParam(core, id, v);
+    for (const id of mouthIds()) setParam(core, id, v);
     if (typeof core.getParameterIndex === "function") {
-      const idx = core.getParameterIndex("ParamMouthOpenY");
-      if (idx >= 0 && typeof core.setParameterValueByIndex === "function") {
-        core.setParameterValueByIndex(idx, v);
-      }
+      hookIndex = core.getParameterIndex("ParamMouthOpenY");
     }
+    hookMouth = readMouthParam();
   }
 
   function readMouthParam() {
@@ -111,10 +134,6 @@
     if (typeof core.getParameterValueById === "function") {
       const v = core.getParameterValueById("ParamMouthOpenY");
       if (Number.isFinite(v)) return v;
-    }
-    if (typeof core.getParameterIndex === "function" && typeof core.getParameterValueByIndex === "function") {
-      const idx = core.getParameterIndex("ParamMouthOpenY");
-      if (idx >= 0) return core.getParameterValueByIndex(idx);
     }
     return null;
   }
@@ -125,8 +144,21 @@
     const params = (lastDrive && lastDrive.params) || {};
     for (const [id, value] of Object.entries(params)) {
       if (MOUTH_IDS.includes(id)) continue;
-      setParam(core, id, value);
+      addParam(core, id, value);
     }
+  }
+
+  function applyFace() {
+    writeEmotionParams();
+    writeMouthParam(mouth);
+  }
+
+  function tickMouth() {
+    if (lastLipsyncAt && performance.now() - lastLipsyncAt > 400) {
+      mouthTarget = 0;
+    }
+    mouth += (mouthTarget - mouth) * 0.55;
+    if (mouth < 0.012 && mouthTarget < 0.012) mouth = 0;
   }
 
   function renderHud(frame) {
@@ -136,8 +168,59 @@
     hud.valence.textContent = fmt(frame.valence);
     hud.arousal.textContent = fmt(frame.arousal);
     hud.engagement.textContent = fmt(frame.engagement);
+    if (hud.needLlm) hud.needLlm.textContent = fmt(frame.need_llm);
     for (const btn of document.querySelectorAll("#modes button")) {
       btn.classList.toggle("active", btn.dataset.mode === frame.mode);
+    }
+  }
+
+  function renderSelf(s) {
+    if (!hud.self) return;
+    if (!s || !s.live) {
+      hud.self.textContent = "—";
+      return;
+    }
+    const bits = [];
+    if (s.who) bits.push(s.who);
+    bits.push(s.live.voice || "—");
+    if (s.live.mode) bits.push(s.live.mode);
+    hud.self.textContent = bits.join(" · ");
+  }
+
+  async function pollSense() {
+    try {
+      const r = await fetch("/api/sense");
+      if (!r.ok) return;
+      renderSelf(await r.json());
+    } catch (e) {}
+  }
+
+  function expressionIndex(name) {
+    const em = expressionManager();
+    if (!em || !name) return -1;
+    if (typeof em.getExpressionIndex === "function") {
+      const idx = em.getExpressionIndex(name);
+      if (idx >= 0) return idx;
+    }
+    if (Array.isArray(em.definitions)) {
+      return em.definitions.findIndex((d) => d && (d.Name === name || d.name === name));
+    }
+    return -1;
+  }
+
+  async function applyExpression(name) {
+    if (!name || !model) return;
+    if (name === lastExpression) return;
+    const idx = expressionIndex(name);
+    try {
+      if (idx >= 0) {
+        await model.expression(idx);
+      } else {
+        await model.expression(name);
+      }
+      lastExpression = name;
+    } catch (err) {
+      console.warn("expression", name, err);
     }
   }
 
@@ -145,13 +228,7 @@
     if (!frame || !model) return;
     lastDrive = frame;
     renderHud(frame);
-    try {
-      if (frame.expression) {
-        await model.expression(frame.expression);
-      }
-    } catch (err) {
-      console.warn("expression", err);
-    }
+    await applyExpression(frame.expression);
     const group = frame.motion_group || "Idle";
     const index = frame.motion_index || 0;
     const sameIdle = group === "Idle" && lastMode === frame.mode;
@@ -243,6 +320,30 @@
     }
   }
 
+  function hookModelUpdate() {
+    const im = model && model.internalModel;
+    if (!im) return;
+    if (typeof im.on === "function") {
+      im.on("beforeModelUpdate", () => {
+        mouthParamHooked = true;
+        applyFace();
+      });
+    }
+    if (typeof im.update === "function") {
+      const orig = im.update.bind(im);
+      im.update = function (dt, now) {
+        tickMouth();
+        orig(dt, now);
+        if (!mouthParamHooked) {
+          applyFace();
+          if (this.coreModel && typeof this.coreModel.update === "function") {
+            this.coreModel.update();
+          }
+        }
+      };
+    }
+  }
+
   async function main() {
     if (!window.PIXI || !PIXI.live2d) {
       setStatus("Cubism / Pixi runtime missing (CDN blocked?)");
@@ -260,26 +361,7 @@
     model = await PIXI.live2d.Live2DModel.from(MODEL);
     app.stage.addChild(model);
     layoutModel();
-    const im = model.internalModel;
-    if (im) {
-      im.lipSync = true;
-      im.lipSyncValue = 0;
-    }
-    if (im && typeof im.update === "function") {
-      const orig = im.update.bind(im);
-      im.update = function (dt, now) {
-        if (lastLipsyncAt && performance.now() - lastLipsyncAt > 180) {
-          mouthTarget = 0;
-        }
-        mouth += (mouthTarget - mouth) * 0.55;
-        if (mouth < 0.012 && mouthTarget < 0.012) mouth = 0;
-        this.lipSync = true;
-        this.lipSyncValue = mouth;
-        orig(dt, now);
-        writeEmotionParams();
-        writeMouthParam(mouth);
-      };
-    }
+    hookModelUpdate();
     window.addEventListener("resize", layoutModel);
     model.on("hit", (areas) => {
       if (areas.includes("HitArea2") || areas.includes("HitAreaBody") || areas.includes("Body")) {
@@ -287,20 +369,20 @@
       }
     });
     bindModes();
+    pollSense();
+    setInterval(pollSense, 2000);
     if (unmuteBtn) unmuteBtn.classList.add("hidden");
     window.__avatar = {
       get mouth() { return mouth; },
       get target() { return mouthTarget; },
       get param() { return readMouthParam(); },
-      get lipSyncIds() {
-        const im = model && model.internalModel;
-        return im && im.settings && im.settings.lipSyncIds;
-      },
-      get coreKeys() {
-        const core = coreModel();
-        if (!core) return [];
-        return Object.getOwnPropertyNames(Object.getPrototypeOf(core) || {}).concat(Object.keys(core));
-      },
+      get hookMouth() { return hookMouth; },
+      get hookIndex() { return hookIndex; },
+      get expression() { return lastExpression; },
+      get drive() { return lastDrive; },
+      get hooked() { return mouthParamHooked; },
+      get lipSyncIds() { return mouthIds(); },
+      setMouth(v) { applyLipsync(v); },
     };
     connectWS();
     setStatus("waiting for Jev…");

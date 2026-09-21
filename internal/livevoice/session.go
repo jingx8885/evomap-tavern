@@ -91,7 +91,6 @@ type Session struct {
 	skipMic       bool
 	offerAudio    string
 	answerAudio   string
-	playGate      playGate
 
 	Verbose bool
 }
@@ -301,26 +300,12 @@ func (s *Session) postCall(sdp, instructions string) (callID, answer string, err
 	return callID, string(raw), nil
 }
 
-// duckMouthMin is MouthOpen of real speech, not comfort-noise padding on
-// the continuous downlink timeline. A low threshold latches ducking and
-// the gateway only ever hears silence.
-const duckMouthMin = 0.18
+// duckHangover covers the winmm jitter buffer plus a beat of speaker
+// tail so echo does not look like a barge-in to server VAD.
+const duckHangover = 900 * time.Millisecond
 
-// playHangover keeps speakers open through short intra-speech gaps so
-// dropping comfort-noise padding does not glue syllables together.
-const playHangover = 320 * time.Millisecond
-
-type playGate struct {
-	until time.Time
-}
-
-// Allow is true while pcm looks like speech, and for playHangover after.
-func (g *playGate) Allow(pcm []byte) bool {
-	if audio.ChunkHasVoice(pcm) {
-		g.until = time.Now().Add(playHangover)
-		return true
-	}
-	return !g.until.IsZero() && time.Now().Before(g.until)
+func (s *Session) duckMic() {
+	s.duckMicUntil.Store(time.Now().Add(duckHangover).UnixNano())
 }
 
 // uplink streams PCMU frames at 20ms cadence: mic frames when available,
@@ -500,16 +485,13 @@ func (s *Session) handleEvent(data []byte) {
 		s.pcmMu.Lock()
 		s.pcmAll = append(s.pcmAll, pcm...)
 		s.pcmMu.Unlock()
-		mouth := audio.MouthOpen(pcm)
-		if mouth > duckMouthMin {
-			s.duckMicUntil.Store(time.Now().Add(400 * time.Millisecond).UnixNano())
+		if audio.ChunkHasVoice(pcm) {
+			s.duckMic()
 		}
-		// Comfort-noise padding is a continuous timeline; playing it
-		// leaks into the mic. Dropping every quiet delta though chops
-		// syllables (MouthOpen only sees the last 20ms). Gate with hangover.
-		if s.player != nil && s.playGate.Allow(pcm) {
+		// Downlink is a continuous 24kHz timeline. Skipping quiet deltas
+		// compresses speech and underruns the player.
+		if s.player != nil {
 			s.player.WritePCM(pcm)
-			s.duckMicUntil.Store(time.Now().Add(400 * time.Millisecond).UnixNano())
 		}
 		s.onPCMMu.Lock()
 		fn := s.onPCM
@@ -533,7 +515,7 @@ func (s *Session) handleEvent(data []byte) {
 		applyTranscript(dst, text)
 		if speaker != "user" {
 			applyTranscript(&s.interim, text)
-			s.duckMicUntil.Store(time.Now().Add(400 * time.Millisecond).UnixNano())
+			s.duckMic()
 		}
 		s.emit(Event{Kind: EventTranscript, Speaker: speaker, Text: dst.String()})
 	case etype == "turn.done" || etype == "turn.completed" || etype == "response.done":

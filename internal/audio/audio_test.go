@@ -38,6 +38,32 @@ func TestResamplePCM(t *testing.T) {
 	}
 }
 
+func TestUpsampleS16LE2x(t *testing.T) {
+	pcm := make([]byte, 8)
+	for i := 0; i < 4; i++ {
+		binary.LittleEndian.PutUint16(pcm[i*2:], uint16(int16(1000)))
+	}
+	out := UpsampleS16LE2x(pcm)
+	if len(out) != 16 {
+		t.Fatalf("len %d", len(out))
+	}
+	for i := 0; i < 8; i++ {
+		if v := int16(binary.LittleEndian.Uint16(out[i*2:])); v != 1000 {
+			t.Fatalf("dc sample %d = %d", i, v)
+		}
+	}
+	ramp := make([]byte, 4)
+	binary.LittleEndian.PutUint16(ramp[0:], uint16(int16(0)))
+	binary.LittleEndian.PutUint16(ramp[2:], uint16(int16(10)))
+	got := UpsampleS16LE2x(ramp)
+	want := []int16{0, 5, 10, 10}
+	for i, w := range want {
+		if v := int16(binary.LittleEndian.Uint16(got[i*2:])); v != w {
+			t.Fatalf("ramp[%d]=%d want %d", i, v, w)
+		}
+	}
+}
+
 func TestWriteWAV(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "x.wav")
@@ -98,7 +124,7 @@ func TestChunkHasVoiceLeadingSpeech(t *testing.T) {
 		binary.LittleEndian.PutUint16(pcm[i*2:], uint16(int16(22000)))
 	}
 	if !ChunkHasVoice(pcm) {
-		t.Fatal("leading speech should still count as voice for playback")
+		t.Fatal("leading speech should count as voice for mic ducking")
 	}
 	if ChunkHasVoice(make([]byte, mouthWindow*4)) {
 		t.Fatal("silence is not voice")

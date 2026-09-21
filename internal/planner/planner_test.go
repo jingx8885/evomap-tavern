@@ -54,9 +54,12 @@ func TestGateSkipsWhenNoPause(t *testing.T) {
 	fj := &fakeJev{pause: 0.1, remaining: 0.9}
 	fl := &fakeLLM{out: `{"note":"x"}`}
 	pl := newPlanner(fj, fl)
-	pl.Tick(context.Background(), memory.New(4), false)
+	pl.Consider(context.Background(), memory.New(4), 0.1)
 	if fl.calls.Load() != 0 {
-		t.Fatal("LLM must not run when gate fails")
+		t.Fatal("LLM must not run when need_llm is low")
+	}
+	if fj.calls.Load() != 0 {
+		t.Fatal("need_llm lives on the turn judge; planner must not call Jev again")
 	}
 }
 
@@ -66,7 +69,7 @@ func TestRefineAppliesLLM(t *testing.T) {
 	pl := newPlanner(fj, fl)
 	mem := memory.New(4)
 	mem.Add(memory.Turn{Speaker: "user", Text: "hi"})
-	pl.Tick(context.Background(), mem, false)
+	pl.Consider(context.Background(), mem, 0.9)
 	deadline := time.Now().Add(2 * time.Second)
 	for pl.State().Source != "llm" && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
@@ -76,6 +79,9 @@ func TestRefineAppliesLLM(t *testing.T) {
 	}
 	if pl.State().GoalStatus["g1"] != "active" {
 		t.Fatalf("goal status not applied")
+	}
+	if fj.calls.Load() != 0 {
+		t.Fatal("planner should not make a second Jev call")
 	}
 }
 
@@ -100,7 +106,7 @@ func TestFallbackOnLLMError(t *testing.T) {
 	fj := &fakeJev{pause: 0.9, remaining: 0.9}
 	fl := &fakeLLM{err: fmt.Errorf("boom")}
 	pl := newPlanner(fj, fl)
-	pl.Tick(context.Background(), memory.New(4), false)
+	pl.Tick(context.Background(), memory.New(4), true)
 	deadline := time.Now().Add(2 * time.Second)
 	for pl.State().LastRefreshed.IsZero() && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)

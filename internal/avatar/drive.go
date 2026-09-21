@@ -4,6 +4,8 @@
 package avatar
 
 import (
+	"math"
+
 	"github.com/jingx8885/lov-evo/internal/judge"
 	"github.com/jingx8885/lov-evo/internal/memory"
 )
@@ -18,8 +20,10 @@ const (
 	ExpBright  = "F05"
 	ExpSpark   = "F06"
 	ExpPlay    = "F07"
-	ExpWarm    = "F01"
+	ExpWarm    = "F07"
 	ExpAlert   = "F06"
+	ExpWorry   = "F04"
+	ExpFrown   = "F08"
 )
 
 // Frame is one Live2D pose instruction pushed over WebSocket.
@@ -36,13 +40,14 @@ type Frame struct {
 	SafetyP     float64            `json:"safety_p"`
 	LookAt      float64            `json:"look_at"`
 	Intensity   float64            `json:"intensity"`
+	NeedLLM     float64            `json:"need_llm"`
 	UserText    string             `json:"user_text,omitempty"`
 	Params      map[string]float64 `json:"params,omitempty"`
 }
 
 // Drive turns a steering mode + Jev judgment + running affect into a frame.
-// The avatar reacts as the persona (comfort when the user is sad), not by
-// copying the user's face.
+// The face follows this turn's Jev emotion/valence/arousal. Mode only
+// picks motion and is the safety override; it does not relabel the face.
 func Drive(mode string, j *judge.Judgment, a memory.Affect) Frame {
 	if j == nil {
 		j = &judge.Judgment{Emotion: "neutral"}
@@ -54,17 +59,18 @@ func Drive(mode string, j *judge.Judgment, a memory.Affect) Frame {
 		Type:       "drive",
 		Mode:       mode,
 		Emotion:    j.Emotion,
-		Valence:    a.Valence,
-		Arousal:    a.Arousal,
+		Valence:    j.Valence,
+		Arousal:    j.Arousal,
 		Engagement: j.Engagement,
 		SafetyP:    j.SafetyP,
+		NeedLLM:    j.NeedLLMP,
 		UserText:   j.UserText,
 	}
-	if f.Valence == 0 && j.Valence != 0 {
-		f.Valence = j.Valence
+	if f.Valence == 0 && a.Valence != 0 {
+		f.Valence = a.Valence
 	}
-	if f.Arousal == 0 && j.Arousal != 0 {
-		f.Arousal = j.Arousal
+	if f.Arousal == 0 && a.Arousal != 0 {
+		f.Arousal = a.Arousal
 	}
 	f.Expression = expressionFor(mode, j)
 	f.MotionGroup, f.MotionIndex = motionFor(mode, f.Arousal)
@@ -72,39 +78,42 @@ func Drive(mode string, j *judge.Judgment, a memory.Affect) Frame {
 	if f.LookAt == 0 {
 		f.LookAt = 0.55
 	}
-	f.Intensity = intensityFor(mode, f.Arousal)
+	f.Intensity = intensityFromScores(j)
 	f.Params = overlayFor(mode, j, f.Intensity)
 	return f
 }
 
 func expressionFor(mode string, j *judge.Judgment) string {
-	switch mode {
-	case "safety", "comfort":
+	if mode == "safety" {
 		return ExpSoft
-	case "de_escalate":
+	}
+	if j == nil {
 		return ExpNeutral
-	case "celebrate":
-		if j.Arousal > 0.8 {
-			return ExpPlay
-		}
-		return ExpBright
-	case "re_engage":
-		return ExpSpark
-	case "goal_push":
-		return ExpWarm
 	}
 	switch j.Emotion {
 	case "joy":
+		if j.Arousal > 0.65 || j.Valence >= 0.8 {
+			return ExpPlay
+		}
 		return ExpBright
 	case "surprise":
 		return ExpAlert
-	case "sadness", "fear":
+	case "sadness":
 		return ExpSoft
-	case "anger", "disgust":
+	case "fear":
+		return ExpWorry
+	case "anger":
+		return ExpFrown
+	case "disgust":
 		return ExpStern
-	default:
-		return ExpNeutral
 	}
+	if j.Valence >= 0.65 {
+		return ExpBright
+	}
+	if j.Valence > 0 && j.Valence <= 0.35 {
+		return ExpSoft
+	}
+	return ExpNeutral
 }
 
 func motionFor(mode string, arousal float64) (string, int) {
@@ -128,74 +137,62 @@ func motionFor(mode string, arousal float64) (string, int) {
 	}
 }
 
-func intensityFor(mode string, arousal float64) float64 {
-	switch mode {
-	case "safety", "comfort", "de_escalate":
-		return clamp01(0.25 + arousal*0.2)
-	case "celebrate":
-		return 1
-	case "re_engage":
-		return 0.75
-	default:
-		return clamp01(0.35 + arousal*0.5)
+func intensityFromScores(j *judge.Judgment) float64 {
+	if j == nil {
+		return 0.45
 	}
+	polar := math.Abs(j.Valence-0.5) * 2
+	return clamp01(0.4 + 0.35*polar + 0.35*j.Arousal)
 }
 
 // overlayFor is applied every frame after Idle motions, so the face
-// actually holds the Jev reaction instead of snapping back to rest.
-// Uses Haru params (ParamMouthForm / ParamTere / brows). Mouth openness
-// is ParamMouthOpenY and is driven only by lip sync.
+// actually holds the Jev scores instead of snapping back to rest.
 func overlayFor(mode string, j *judge.Judgment, intensity float64) map[string]float64 {
 	if j == nil {
 		j = &judge.Judgment{Emotion: "neutral"}
 	}
 	k := clamp01(0.4 + intensity*0.6)
 	p := map[string]float64{}
-	switch mode {
-	case "safety", "comfort":
-		p["ParamBrowLY"] = -0.55 * k
-		p["ParamBrowRY"] = -0.55 * k
-		p["ParamMouthForm"] = -0.7 * k
-		p["ParamTear"] = 0.25 * k
-	case "de_escalate":
-		p["ParamBrowLForm"] = 0.45 * k
-		p["ParamBrowRForm"] = 0.45 * k
-		p["ParamMouthForm"] = -0.35 * k
-	case "celebrate":
-		p["ParamTere"] = 0.85 * k
-		p["ParamMouthForm"] = 0.65 * k
-		p["ParamEyeLSmile"] = 0.6 * k
-		p["ParamEyeRSmile"] = 0.6 * k
-	case "re_engage":
-		p["ParamBrowLY"] = 0.3 * k
-		p["ParamBrowRY"] = 0.3 * k
-		p["ParamMouthForm"] = 0.25 * k
-		p["ParamTere"] = 0.2 * k
-	case "goal_push":
-		p["ParamMouthForm"] = 0.4 * k
-		p["ParamTere"] = 0.28 * k
-		p["ParamBrowLY"] = 0.18 * k
-		p["ParamBrowRY"] = 0.18 * k
+	if mode == "safety" {
+		p["ParamBrowLY"] = -0.7 * k
+		p["ParamBrowRY"] = -0.7 * k
+		p["ParamMouthForm"] = -0.85 * k
+		p["ParamTear"] = 0.4 * k
+		return p
+	}
+	switch j.Emotion {
+	case "joy":
+		p["ParamTere"] = clamp01(0.45+j.Valence*0.55) * k
+		p["ParamMouthForm"] = clamp01(0.35+j.Valence*0.6) * k
+		p["ParamEyeLSmile"] = clamp01(0.3+j.Arousal*0.5) * k
+		p["ParamEyeRSmile"] = clamp01(0.3+j.Arousal*0.5) * k
+	case "surprise":
+		p["ParamBrowLY"] = 0.75 * k
+		p["ParamBrowRY"] = 0.75 * k
+		p["ParamMouthForm"] = -0.25 * k
+	case "sadness":
+		p["ParamBrowLY"] = -0.7 * k
+		p["ParamBrowRY"] = -0.7 * k
+		p["ParamMouthForm"] = -0.85 * k
+		p["ParamTear"] = 0.4 * k
+	case "fear":
+		p["ParamBrowLY"] = -0.35 * k
+		p["ParamBrowRY"] = -0.35 * k
+		p["ParamBrowLForm"] = 0.4 * k
+		p["ParamBrowRForm"] = 0.4 * k
+		p["ParamMouthForm"] = -0.45 * k
+	case "anger", "disgust":
+		p["ParamMouthForm"] = -0.85 * k
+		p["ParamBrowLForm"] = 0.7 * k
+		p["ParamBrowRForm"] = 0.7 * k
 	default:
-		switch j.Emotion {
-		case "joy":
-			p["ParamTere"] = 0.5 * k
-			p["ParamMouthForm"] = 0.5 * k
-			p["ParamEyeLSmile"] = 0.35 * k
-			p["ParamEyeRSmile"] = 0.35 * k
-		case "surprise":
-			p["ParamBrowLY"] = 0.6 * k
-			p["ParamBrowRY"] = 0.6 * k
-			p["ParamMouthForm"] = -0.2 * k
-		case "sadness", "fear":
-			p["ParamBrowLY"] = -0.45 * k
-			p["ParamBrowRY"] = -0.45 * k
-			p["ParamMouthForm"] = -0.55 * k
-			p["ParamTear"] = 0.2 * k
-		case "anger", "disgust":
-			p["ParamMouthForm"] = -0.6 * k
-			p["ParamBrowLForm"] = 0.45 * k
-			p["ParamBrowRForm"] = 0.45 * k
+		if j.Valence >= 0.6 {
+			p["ParamMouthForm"] = (j.Valence - 0.5) * 1.4 * k
+			p["ParamTere"] = (j.Valence - 0.5) * k
+		} else if j.Valence > 0 && j.Valence <= 0.4 {
+			p["ParamMouthForm"] = (j.Valence - 0.5) * 1.6 * k
+			p["ParamBrowLY"] = (j.Valence - 0.5) * k
+			p["ParamBrowRY"] = (j.Valence - 0.5) * k
 		}
 	}
 	if len(p) == 0 {

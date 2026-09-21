@@ -23,6 +23,7 @@ const (
 	PCMUFrameBytes = 160
 	PCMUFrameDur   = 20 * time.Millisecond
 	DownlinkRate   = 24000
+	PlayRate       = 48000 // Windows devices are almost always 48kHz native
 	PCMUUplinkRate = 8000
 	SilenceByte    = 0xFF
 )
@@ -109,6 +110,27 @@ func ResamplePCM(pcm []byte, fromRate, toRate int) []byte {
 		b := int16(binary.LittleEndian.Uint16(pcm[i1*2:]))
 		v := float64(a) + frac*(float64(b)-float64(a))
 		binary.LittleEndian.PutUint16(out[i*2:], uint16(int16(math.Round(v))))
+	}
+	return out
+}
+
+// UpsampleS16LE2x doubles 24kHz s16le to 48kHz with linear interpolation.
+// Playing 24kHz through winmm WAVE_MAPPER lets the driver resample to the
+// device rate (usually 48kHz) and that conversion is what sounds metallic.
+func UpsampleS16LE2x(pcm []byte) []byte {
+	n := len(pcm) / 2
+	if n == 0 {
+		return nil
+	}
+	out := make([]byte, n*4)
+	for i := 0; i < n; i++ {
+		a := int16(binary.LittleEndian.Uint16(pcm[i*2:]))
+		b := a
+		if i+1 < n {
+			b = int16(binary.LittleEndian.Uint16(pcm[(i+1)*2:]))
+		}
+		binary.LittleEndian.PutUint16(out[i*4:], uint16(a))
+		binary.LittleEndian.PutUint16(out[i*4+2:], uint16(int16((int32(a)+int32(b))/2)))
 	}
 	return out
 }
@@ -201,7 +223,7 @@ func UlawFrames(ulaw []byte) [][]byte {
 
 // Player streams downlink PCM to speakers.
 // Backends: winmm (Windows), afplay (macOS), aplay/ffplay (Linux).
-// Chunked file playback is a fallback; winmm streams s16le 24kHz directly.
+// Chunked file playback is a fallback; winmm upsamples 24kHz to 48kHz.
 type Player struct {
 	kind       string
 	playerPath string
@@ -510,9 +532,9 @@ func MouthOpen(pcm []byte) float64 {
 
 const mouthFrameBytes = mouthWindow * 2
 
-// ChunkHasVoice reports whether any 20ms window in pcm looks like speech.
-// MouthOpen only inspects the trailing window (for lip sync); using that
-// to gate speakers drops a whole delta that ends in a quiet tail.
+// ChunkHasVoice reports whether any 20ms window looks like speech.
+// MouthOpen only inspects the trailing window (lip sync); ducking must
+// see leading speech or the mic stays open and barge-in cuts TTS.
 func ChunkHasVoice(pcm []byte) bool {
 	if len(pcm) < 2 {
 		return false

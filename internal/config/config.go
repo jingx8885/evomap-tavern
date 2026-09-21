@@ -21,6 +21,9 @@ const DefaultLiveModel = "gpt-live-1-boulder-alpha"
 // DefaultPlannerModel is the LLM used for long-term planning.
 const DefaultPlannerModel = "gpt-5.6-luna"
 
+// DefaultVisionModel is the multimodal captioner for camera/screen frames.
+const DefaultVisionModel = "gpt-5.6-luna"
+
 // ResolveBaseURL returns the OpenAI-compatible /v1 root:
 // explicit value > NEW_API_BASE_URL > default. It normalizes a bare host
 // or a path root to ".../v1".

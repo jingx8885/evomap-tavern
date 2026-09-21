@@ -107,38 +107,61 @@ func (pl *Planner) ConsumeNudge(since time.Time) (string, bool) {
 	return pl.plan.Note, true
 }
 
-func gateQuestions() map[string]jev.Question {
-	return map[string]jev.Question{
-		"natural_pause": {
-			Type: "noul",
-			Instructions: "Is the conversation in state at a natural pause where " +
-				"steering the long-term direction would not interrupt the user? " +
-				"Consider engagement and whether a topic just wrapped up.",
-		},
-		"goals_remaining": {
-			Type: "noul",
-			Instructions: "Given state.goals and state.recent, is there still " +
-				"meaningful long-term guidance the conversation has not " +
-				"yet achieved?",
-		},
+// Consider uses the turn's Jev need_llm score to decide whether to spend
+// an LLM refine. It does not make a second System One call.
+func (pl *Planner) Consider(ctx context.Context, mem *memory.Memory, needLLM float64) {
+	if !pl.Persona.Planner.Enabled {
+		return
 	}
+	pl.mu.Lock()
+	pl.turns++
+	turns := pl.turns
+	refining := pl.refining
+	last := pl.plan.LastRefreshed
+	interval := pl.Persona.Planner.IntervalTurn
+	thresh := pl.Persona.Judge.NeedLLMThresh
+	pl.mu.Unlock()
+	if thresh <= 0 {
+		thresh = 0.55
+	}
+	if needLLM < thresh {
+		pl.logf("need_llm=%.2f -> skip", needLLM)
+		return
+	}
+	if refining {
+		pl.logf("need_llm=%.2f -> already refining", needLLM)
+		return
+	}
+	if interval > 1 && turns%interval != 0 && needLLM < 0.8 {
+		pl.logf("need_llm=%.2f -> wait interval (turn %d)", needLLM, turns)
+		return
+	}
+	if !last.IsZero() && time.Since(last) < 6*time.Second && needLLM < 0.8 {
+		pl.logf("need_llm=%.2f -> cooldown", needLLM)
+		return
+	}
+	pl.logf("need_llm=%.2f -> refining (async)", needLLM)
+	pl.launchRefine(mem)
 }
 
-// Tick advances one turn. When the interval hits and the Jev gate
-// passes, it launches an asynchronous LLM refine.
+// Tick advances one turn. force=true skips the need_llm score (used by
+// the plan command). The live loop should call Consider instead so the
+// turn judgment is the only Jev call.
 func (pl *Planner) Tick(ctx context.Context, mem *memory.Memory, force bool) {
-	pl.turns++
-	if !pl.Persona.Planner.Enabled && !force {
+	if force {
+		pl.launchRefine(mem)
 		return
 	}
-	if pl.turns%pl.Persona.Planner.IntervalTurn != 0 && !force {
-		return
-	}
+	pl.Consider(ctx, mem, 0)
+}
+
+func (pl *Planner) launchRefine(mem *memory.Memory) {
 	pl.mu.Lock()
 	if pl.refining {
 		pl.mu.Unlock()
 		return
 	}
+	pl.refining = true
 	pl.mu.Unlock()
 
 	state := map[string]any{
@@ -148,23 +171,6 @@ func (pl *Planner) Tick(ctx context.Context, mem *memory.Memory, force bool) {
 		"affect":  mem.Affect(),
 		"plan":    pl.State(),
 	}
-	res, err := pl.Jev.Evaluate(ctx, state, gateQuestions())
-	if err != nil {
-		pl.logf("planner gate failed: %v", err)
-		return
-	}
-	pause := noul(res.Answers["natural_pause"])
-	remaining := noul(res.Answers["goals_remaining"])
-	if !force && (pause < 0.55 || remaining < 0.4) {
-		pl.logf("planner gate: pause=%.2f remaining=%.2f -> skip", pause, remaining)
-		return
-	}
-
-	pl.mu.Lock()
-	pl.refining = true
-	pl.mu.Unlock()
-	pl.logf("planner gate: pause=%.2f remaining=%.2f -> refining (async)", pause, remaining)
-
 	go pl.refine(state)
 }
 
@@ -224,13 +230,6 @@ func (pl *Planner) fallbackRotate() {
 	pl.plan.Note = "Shift toward: " + pl.Persona.Goals[pl.nextGoalIx]
 	pl.plan.Source = "persona"
 	pl.plan.LastRefreshed = time.Now()
-}
-
-func noul(a jev.Answer) float64 {
-	if a.Noul == nil {
-		return 0
-	}
-	return *a.Noul
 }
 
 func toStrings(v any) []string {

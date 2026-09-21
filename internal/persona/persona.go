@@ -11,10 +11,12 @@ import (
 
 // JudgeConfig controls Jev judgment switches and thresholds.
 type JudgeConfig struct {
-	Emotion      bool    `yaml:"emotion"`
-	PersonaFit   bool    `yaml:"persona_fit"`
-	Safety       bool    `yaml:"safety"`
-	SafetyThresh float64 `yaml:"safety_threshold"`
+	Emotion       bool    `yaml:"emotion"`
+	PersonaFit    bool    `yaml:"persona_fit"`
+	Safety        bool    `yaml:"safety"`
+	SafetyThresh  float64 `yaml:"safety_threshold"`
+	NeedLLMThresh float64 `yaml:"need_llm_threshold"`
+	FitThresh     float64 `yaml:"fit_threshold"`
 }
 
 // PlannerConfig controls the asynchronous long-term planner.
@@ -23,18 +25,29 @@ type PlannerConfig struct {
 	IntervalTurn int  `yaml:"interval_turn"`
 }
 
+// SenseConfig is proprioception: whether she is allowed to feel her own
+// body (voice, face, mood, source) and speak from that sensation.
+type SenseConfig struct {
+	Enabled bool `yaml:"enabled"`
+	Eyes    bool `yaml:"eyes"`
+}
+
 // Persona is a pluggable persona.
 type Persona struct {
-	Name       string            `yaml:"name"`
-	Style      string            `yaml:"style"`
-	Background string            `yaml:"background"`
-	Taboos     []string          `yaml:"taboos"`
-	Voice      string            `yaml:"voice"`
-	Greeting   string            `yaml:"greeting"`
-	Goals      []string          `yaml:"goals"`
-	Judge      JudgeConfig       `yaml:"judge"`
-	Planner    PlannerConfig     `yaml:"planner"`
-	Extra      map[string]string `yaml:"extra"`
+	Name         string            `yaml:"name"`
+	Style        string            `yaml:"style"`
+	Background   string            `yaml:"background"`
+	Taboos       []string          `yaml:"taboos"`
+	Voice        string            `yaml:"voice"`
+	Greeting     string            `yaml:"greeting"`
+	Goals        []string          `yaml:"goals"`
+	Catchphrases []string          `yaml:"catchphrases"`
+	Examples     []string          `yaml:"examples"`
+	Reactions    map[string]string `yaml:"reactions"`
+	Judge        JudgeConfig       `yaml:"judge"`
+	Planner      PlannerConfig     `yaml:"planner"`
+	Sense        SenseConfig       `yaml:"sense"`
+	Extra        map[string]string `yaml:"extra"`
 }
 
 // Load reads a persona YAML file.
@@ -56,6 +69,12 @@ func Load(path string) (*Persona, error) {
 	if p.Judge.SafetyThresh == 0 {
 		p.Judge.SafetyThresh = 0.6
 	}
+	if p.Judge.NeedLLMThresh == 0 {
+		p.Judge.NeedLLMThresh = 0.55
+	}
+	if p.Judge.FitThresh == 0 {
+		p.Judge.FitThresh = 0.45
+	}
 	if p.Planner.IntervalTurn <= 0 {
 		p.Planner.IntervalTurn = 5
 	}
@@ -75,7 +94,45 @@ func (p *Persona) BaseInstructions() string {
 	if len(p.Taboos) > 0 {
 		fmt.Fprintf(&b, "Never: %s. ", strings.Join(p.Taboos, "; "))
 	}
-	b.WriteString("Wait for the user to speak first. Do not greet, introduce yourself, or repeat your name unless asked. Follow the latest steering mode for how to talk. ")
+	b.WriteString(p.CatchphraseDirective())
+	b.WriteString(p.ExampleDirective())
+	b.WriteString("Wait for the user to speak first. Do not greet, introduce yourself, or repeat your name unless asked. Follow the latest steering mode for how to talk, but mode is not a personality transplant. ")
+	if p.Sense.Enabled {
+		b.WriteString("You have a body you can feel: your voice, your Live2D face, your mood, and the source files that make you. Do not announce this. If asked, answer from that sensation in your own words, without reciting source or sounding like a manual. ")
+		if p.Sense.Eyes {
+			b.WriteString("You also have eyes: a camera and the computer screen, running at the same time. Do not announce them. If asked what you see, answer from the latest eye note; never dump screen text or invent faces. ")
+		}
+	}
 	b.WriteString("Respond conversationally in the user's language; keep replies short enough for voice.")
 	return b.String()
+}
+
+// CatchphraseDirective tells the voice model how to sprinkle catchphrases.
+func (p *Persona) CatchphraseDirective() string {
+	if p == nil || len(p.Catchphrases) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Catchphrases (at most one every few replies, never every sentence): %s. ",
+		strings.Join(p.Catchphrases, "; "))
+}
+
+// ExampleDirective injects a few spoken lines so the voice model copies cadence.
+func (p *Persona) ExampleDirective() string {
+	if p == nil || len(p.Examples) == 0 {
+		return ""
+	}
+	n := len(p.Examples)
+	if n > 4 {
+		n = 4
+	}
+	return "How you sound (match this cadence, do not quote or read them out): " +
+		strings.Join(p.Examples[:n], " / ") + ". "
+}
+
+// Reaction is how this persona handles a steering mode. Empty if unset.
+func (p *Persona) Reaction(mode string) string {
+	if p == nil || len(p.Reactions) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(p.Reactions[mode])
 }

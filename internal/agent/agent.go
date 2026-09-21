@@ -15,6 +15,7 @@ import (
 
 	"github.com/jingx8885/lov-evo/internal/audio"
 	"github.com/jingx8885/lov-evo/internal/avatar"
+	"github.com/jingx8885/lov-evo/internal/desk"
 	"github.com/jingx8885/lov-evo/internal/jev"
 	"github.com/jingx8885/lov-evo/internal/judge"
 	"github.com/jingx8885/lov-evo/internal/livevoice"
@@ -22,6 +23,7 @@ import (
 	"github.com/jingx8885/lov-evo/internal/memory"
 	"github.com/jingx8885/lov-evo/internal/persona"
 	"github.com/jingx8885/lov-evo/internal/planner"
+	"github.com/jingx8885/lov-evo/internal/sense"
 	"github.com/jingx8885/lov-evo/internal/steering"
 )
 
@@ -40,7 +42,9 @@ type Options struct {
 	Live2DDir    string
 	OpenViewer   bool
 	Say          string
+	SenseRoot    string
 	avatarHub    *avatar.Hub
+	sense        *sense.Bus
 }
 
 // Run starts a live voice session and processes turns until ctx is done.
@@ -55,6 +59,19 @@ func Run(ctx context.Context, opt Options) error {
 	pl := planner.New(p, jevClient, llmClient, opt.PlannerModel)
 	pl.LogFn = func(s string) { opt.log("%s", "[planner] "+s) }
 
+	bus, serr := sense.Open(sense.Options{Root: opt.SenseRoot, RunsDir: opt.RunsDir})
+	if serr != nil {
+		opt.log("sense disabled: %v", serr)
+	} else {
+		opt.sense = bus
+		defer bus.Close()
+		bus.Set(func(l *sense.Live) {
+			l.Persona = p.Name
+			l.VoiceName = p.Voice
+			l.Voice = "connecting"
+		})
+	}
+
 	if addr := strings.TrimSpace(opt.Live2DAddr); addr != "" && addr != "off" {
 		hub, _, err := avatar.Listen(ctx, avatar.ListenOptions{
 			Addr:  addr,
@@ -66,6 +83,9 @@ func Run(ctx context.Context, opt Options) error {
 			opt.log("live2d disabled: %v", err)
 		} else {
 			opt.avatarHub = hub
+			if opt.sense != nil {
+				hub.SetSense(func() any { return opt.sense.Snapshot(p.Name) })
+			}
 			hub.Publish(avatar.Drive("continue", &judge.Judgment{
 				Emotion: "neutral", Engagement: 0.7,
 			}, memory.Affect{Valence: 0.55, Arousal: 0.4, Emotion: "neutral"}))
@@ -75,7 +95,8 @@ func Run(ctx context.Context, opt Options) error {
 	cmds := make(chan string, 16)
 	go readStdin(ctx, cmds)
 	opt.log("commands: /say <text> (speak) /steer <text> (reinstruct) " +
-		"/goal <text> (plan) /status /quit")
+		"/goal <text> (plan) /look <file> (her source) /sense /desk <goal> " +
+		"/codex <goal> (luna) /status /quit")
 
 	first := true
 	var lastErr error
@@ -119,6 +140,8 @@ func Run(ctx context.Context, opt Options) error {
 			continue
 		}
 		opt.log("session started; persona=%s voice=%s", p.Name, p.Voice)
+		opt.sense.Set(func(l *sense.Live) { l.Voice = "up" })
+		opt.sense.Emit(sense.Event{Kind: sense.KindVoice, Summary: "up"})
 
 		if first {
 			if opt.Greeting && p.Greeting != "" {
@@ -136,8 +159,10 @@ func Run(ctx context.Context, opt Options) error {
 			first = false
 		}
 
-		res := pumpSession(ctx, opt, p, jevClient, mem, pl, sess, cmds)
+		res := pumpSession(ctx, opt, p, jevClient, llmClient, mem, pl, sess, cmds)
 		sess.Close()
+		opt.sense.Set(func(l *sense.Live) { l.Voice = "down" })
+		opt.sense.Emit(sense.Event{Kind: sense.KindVoice, Summary: "down"})
 		switch res.kind {
 		case pumpQuit, pumpCancel:
 			return opt.saveLog(mem, pl, res.err)
@@ -167,10 +192,11 @@ type pumpResult struct {
 }
 
 func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
-	jevClient *jev.Client, mem *memory.Memory, pl *planner.Planner,
+	jevClient *jev.Client, llmClient *llm.Client, mem *memory.Memory, pl *planner.Planner,
 	sess *livevoice.Session, cmds <-chan string) pumpResult {
 	var lastTurnKey string
 	var lastTurnAt time.Time
+	gate := newJevGate()
 	for {
 		select {
 		case <-ctx.Done():
@@ -195,60 +221,221 @@ func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
 					mem.Add(memory.Turn{Speaker: "user", Text: ev.Text})
 					opt.log("[user] %s", clip(ev.Text, 120))
 				}
-				go processTurn(ctx, opt, p, jevClient, mem, pl, sess, ev.Text)
+				opt.sense.Emit(sense.Event{
+					Kind:    sense.KindTurn,
+					Summary: clip(ev.Text, 80),
+					Data:    map[string]any{"user": clip(ev.Text, 160), "assistant": clip(assistant, 160)},
+				})
+				opt.sense.Set(func(l *sense.Live) {
+					l.Turns++
+					if ev.Text != "" {
+						l.LastUser = clip(ev.Text, 160)
+					}
+				})
+				gate.cancelTimer()
+				go processTurn(ctx, opt, p, jevClient, mem, pl, sess, gate, ev.Text, true)
 			case livevoice.EventTranscript:
 				if ev.Speaker == "user" {
 					opt.log("[user~] %s", clip(ev.Text, 120))
+					text := ev.Text
+					gate.schedule(320*time.Millisecond, text, func() {
+						go processTurn(ctx, opt, p, jevClient, mem, pl, sess, gate, text, false)
+					})
 				}
 			case livevoice.EventWarning:
 				opt.log("[voice warning] %v", ev.Err)
+				opt.sense.Emit(sense.Event{Kind: sense.KindWarning, Summary: fmt.Sprint(ev.Err)})
 			case livevoice.EventError:
 				opt.log("[voice error] %v", ev.Err)
+				opt.sense.Emit(sense.Event{Kind: sense.KindError, Summary: fmt.Sprint(ev.Err)})
 			case livevoice.EventClosed:
+				opt.log("session closed: %v", ev.Err)
+				return pumpResult{kind: pumpDrop, err: ev.Err}
 				opt.log("session closed: %v", ev.Err)
 				return pumpResult{kind: pumpDrop, err: ev.Err}
 			}
 		case line := <-cmds:
-			if handleCommand(line, p, pl, sess, opt) {
+			if handleCommand(ctx, line, p, pl, sess, opt, jevClient, llmClient) {
 				return pumpResult{kind: pumpQuit}
 			}
 		}
 	}
 }
 
+// jevGate dedupes speculative (partial transcript) and final turn judgments.
+type jevGate struct {
+	mu       sync.Mutex
+	timer    *time.Timer
+	pending  string
+	inflight map[string]bool
+	done     map[string]time.Time
+	last     *judge.Judgment
+}
+
+func newJevGate() *jevGate {
+	return &jevGate{
+		inflight: map[string]bool{},
+		done:     map[string]time.Time{},
+	}
+}
+
+func (g *jevGate) schedule(delay time.Duration, text string, fn func()) {
+	n := strings.Join(strings.Fields(text), " ")
+	if n == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.pending = n
+	if g.timer != nil {
+		g.timer.Stop()
+	}
+	captured := n
+	g.timer = time.AfterFunc(delay, func() {
+		g.mu.Lock()
+		same := g.pending == captured
+		g.timer = nil
+		g.mu.Unlock()
+		if same {
+			fn()
+		}
+	})
+}
+
+func (g *jevGate) cancelTimer() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.timer != nil {
+		g.timer.Stop()
+		g.timer = nil
+	}
+}
+
+func (g *jevGate) claim(text string) bool {
+	n := strings.Join(strings.Fields(text), " ")
+	if n == "" {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.inflight[n] {
+		return false
+	}
+	if t, ok := g.done[n]; ok && time.Since(t) < 15*time.Second {
+		return false
+	}
+	now := time.Now()
+	for prev, t := range g.done {
+		if now.Sub(t) > 15*time.Second {
+			delete(g.done, prev)
+		}
+	}
+	g.inflight[n] = true
+	return true
+}
+
+func (g *jevGate) finish(text string, ok bool) {
+	n := strings.Join(strings.Fields(text), " ")
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.inflight, n)
+	if ok {
+		g.done[n] = time.Now()
+	}
+}
+
+func (g *jevGate) remember(jd *judge.Judgment) {
+	g.mu.Lock()
+	g.last = jd
+	g.mu.Unlock()
+}
+
+func (g *jevGate) lastJudgment() *judge.Judgment {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.last
+}
+
 // processTurn runs Jev judgment + steering + planner tick for one turn.
+// Speculative calls (final=false) run from a debounced user transcript so
+// steering can land while the duplex model is still speaking.
 func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 	jc *jev.Client, mem *memory.Memory, pl *planner.Planner,
-	sess *livevoice.Session, userText string) {
+	sess *livevoice.Session, gate *jevGate, userText string, final bool) {
 	// Greeting / model self-talk has no user text. Judging those as
 	// "low engagement" steers re_engage and commentary-nudges, which
 	// makes the duplex model say the same line again.
 	if strings.TrimSpace(userText) == "" {
 		return
 	}
-	jd, err := judge.JudgeTurn(ctx, jc, p, mem, userText)
-	if err != nil {
-		opt.log("[judge] skipped: %v", err)
+	claimed := gate.claim(userText)
+	if claimed {
+		jd, err := judge.JudgeTurn(ctx, jc, p, mem, userText, pl.Current())
+		if err != nil {
+			gate.finish(userText, false)
+			opt.log("[judge] skipped: %v", err)
+		} else {
+			gate.finish(userText, true)
+			safety := jd.SafetyP >= p.Judge.SafetyThresh
+			mem.UpdateAffect(jd.Valence, jd.Arousal, jd.Emotion, safety)
+			affect := mem.Affect()
+			tag := ""
+			if !final {
+				tag = " early"
+			}
+			opt.log("[judge]%s emotion=%s intent=%s self=%s jev_mode=%s valence=%.2f arousal=%.2f engage=%.2f safety=%.2f fit=%.2f need_llm=%.2f conf=%.2f",
+				tag, jd.Emotion, orDash(jd.Intent), orDash(jd.SelfEmotion), orDash(jd.Mode),
+				jd.Valence, jd.Arousal, jd.Engagement, jd.SafetyP, jd.PersonaFitP, jd.NeedLLMP, jd.Confidence)
+
+			mode := judge.DecideMode(jd, affect, p.Judge.SafetyThresh, pl.Current())
+			if opt.avatarHub != nil {
+				frame := avatar.Drive(mode, jd, affect)
+				opt.avatarHub.Publish(frame)
+				opt.sense.Set(func(l *sense.Live) {
+					l.Expression = frame.Expression
+					l.Mouth = opt.avatarHub.MouthValue()
+				})
+			}
+			opt.sense.Set(func(l *sense.Live) {
+				l.Mode = mode
+				l.Emotion = jd.Emotion
+				l.Affect = affect
+				l.Plan = pl.Current()
+				l.LastUser = clip(userText, 160)
+			})
+			opt.sense.Emit(sense.Event{
+				Kind:    sense.KindJudge,
+				Summary: mode + " " + jd.Emotion,
+				Data: map[string]any{
+					"mode": mode, "emotion": jd.Emotion,
+					"valence": jd.Valence, "arousal": jd.Arousal,
+					"engage": jd.Engagement, "early": !final,
+				},
+			})
+			note := steering.Build(p, mode, jd, affect, pl.Current())
+			ask := sense.ParseAsk(userText)
+			if ask.Kind != "" {
+				opt.sense.Set(func(l *sense.Live) { l.LastAsk = ask.Kind })
+			}
+			if felt := opt.sense.Felt(p, ask); felt != "" {
+				note = note + " " + felt
+			}
+			if err := sess.Steer(note); err != nil {
+				opt.log("[steer] failed: %v", err)
+			} else {
+				opt.log("[steer] mode=%s", mode)
+				opt.sense.Emit(sense.Event{Kind: sense.KindSteer, Summary: mode})
+			}
+			gate.remember(jd)
+		}
+	}
+	if !final {
 		return
 	}
-	safety := jd.SafetyP >= p.Judge.SafetyThresh
-	mem.UpdateAffect(jd.Valence, jd.Arousal, jd.Emotion, safety)
-	affect := mem.Affect()
-	opt.log("[judge] emotion=%s valence=%.2f arousal=%.2f engage=%.2f safety=%.2f conf=%.2f",
-		jd.Emotion, jd.Valence, jd.Arousal, jd.Engagement, jd.SafetyP, jd.Confidence)
-
-	mode := judge.DecideMode(jd, affect, p.Judge.SafetyThresh, pl.Current())
-	if opt.avatarHub != nil {
-		opt.avatarHub.Publish(avatar.Drive(mode, jd, affect))
-	}
-	note := steering.Build(p, mode, jd, affect, pl.Current())
-	if err := sess.Steer(note); err != nil {
-		opt.log("[steer] failed: %v", err)
-	} else {
-		opt.log("[steer] mode=%s", mode)
+	if jd := gate.lastJudgment(); jd != nil {
+		pl.Consider(ctx, mem, jd.NeedLLMP)
 	}
 	before := pl.State().LastRefreshed
-	pl.Tick(ctx, mem, false)
 	go func() {
 		deadline := time.Now().Add(50 * time.Second)
 		for time.Now().Before(deadline) {
@@ -257,6 +444,7 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 					opt.log("[nudge] failed: %v", err)
 				} else {
 					opt.log("[nudge] %s", note)
+					opt.sense.Emit(sense.Event{Kind: sense.KindPlan, Summary: clip(note, 120)})
 				}
 				return
 			}
@@ -269,8 +457,8 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 }
 
 // handleCommand processes a slash command; returns true to quit.
-func handleCommand(line string, p *persona.Persona, pl *planner.Planner,
-	sess *livevoice.Session, opt Options) bool {
+func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *planner.Planner,
+	sess *livevoice.Session, opt Options, jc *jev.Client, lc *llm.Client) bool {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return false
@@ -279,7 +467,44 @@ func handleCommand(line string, p *persona.Persona, pl *planner.Planner,
 	case line == "/quit", line == "/q":
 		return true
 	case line == "/status":
-		opt.log("[status] plan=%s affect_state logged at exit", pl.Current())
+		if opt.sense != nil {
+			live := opt.sense.Live()
+			opt.log("[status] voice=%s mode=%s face=%s turns=%d plan=%s",
+				live.Voice, orDash(live.Mode), orDash(live.Expression), live.Turns, pl.Current())
+		} else {
+			opt.log("[status] plan=%s affect_state logged at exit", pl.Current())
+		}
+	case line == "/sense":
+		if opt.sense == nil {
+			opt.log("sense unavailable")
+			break
+		}
+		raw, _ := json.MarshalIndent(opt.sense.Snapshot(p.Name), "", "  ")
+		opt.log("[sense]\n%s", raw)
+		opt.sense.Emit(sense.Event{Kind: sense.KindCommand, Summary: "/sense"})
+		if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskBody}); felt != "" {
+			if err := sess.Steer(felt); err != nil {
+				opt.log("[sense] steer failed: %v", err)
+			}
+		}
+	case strings.HasPrefix(line, "/look "):
+		rel := strings.TrimSpace(strings.TrimPrefix(line, "/look "))
+		if opt.sense == nil {
+			opt.log("sense unavailable")
+			break
+		}
+		view, err := opt.sense.Read(rel, 0)
+		if err != nil {
+			opt.log("[look] %v", err)
+			break
+		}
+		opt.log("[look] %s lines=%d clipped=%v", view.Path, view.Lines, view.Clipped)
+		opt.sense.Emit(sense.Event{Kind: sense.KindLook, Summary: view.Path})
+		if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskFile, File: view.Path}); felt != "" {
+			if err := sess.Steer(felt); err != nil {
+				opt.log("[look] steer failed: %v", err)
+			}
+		}
 	case strings.HasPrefix(line, "/say "):
 		if err := sess.Speak(strings.TrimPrefix(line, "/say ")); err != nil {
 			opt.log("speak failed: %v", err)
@@ -291,8 +516,57 @@ func handleCommand(line string, p *persona.Persona, pl *planner.Planner,
 	case strings.HasPrefix(line, "/goal "):
 		pl.SetNote(strings.TrimPrefix(line, "/goal "))
 		opt.log("goal set")
+	case strings.HasPrefix(line, "/desk "):
+		goal := strings.TrimSpace(strings.TrimPrefix(line, "/desk "))
+		if goal == "" {
+			opt.log("desk needs a goal")
+			break
+		}
+		opt.log("[desk] starting: %s", goal)
+		go func() {
+			rep, err := desk.Run(ctx, desk.Options{
+				Goal:   goal,
+				Prefer: "",
+				Jev:    jc,
+				LLM:    lc,
+				APIKey: opt.APIKey,
+				LogFn:  func(s string) { opt.log("[desk] %s", s) },
+			})
+			if err != nil {
+				opt.log("[desk] failed: %v", err)
+				return
+			}
+			opt.log("[desk] status=%s steps=%d", rep.Status, len(rep.Steps))
+			opt.sense.Emit(sense.Event{Kind: sense.KindDesk, Summary: "desk " + rep.Status})
+		}()
+	case strings.HasPrefix(line, "/codex "):
+		goal := strings.TrimSpace(strings.TrimPrefix(line, "/codex "))
+		if goal == "" {
+			opt.log("codex needs a goal")
+			break
+		}
+		model := opt.PlannerModel
+		if model == "" {
+			model = "gpt-5.6-luna"
+		}
+		opt.log("[codex] starting model=%s: %s", model, goal)
+		go func() {
+			rep, err := desk.Run(ctx, desk.Options{
+				Goal:       goal,
+				Driver:     "codex",
+				CodexModel: model,
+				APIKey:     opt.APIKey,
+				LogFn:      func(s string) { opt.log("[codex] %s", s) },
+			})
+			if err != nil {
+				opt.log("[codex] failed: %v", err)
+				return
+			}
+			opt.log("[codex] status=%s steps=%d", rep.Status, len(rep.Steps))
+			opt.sense.Emit(sense.Event{Kind: sense.KindDesk, Summary: "codex " + rep.Status})
+		}()
 	default:
-		opt.log("unknown command (try /say /steer /goal /status /quit)")
+		opt.log("unknown command (try /say /steer /goal /look /sense /desk /codex /status /quit)")
 	}
 	return false
 }
@@ -331,6 +605,9 @@ func (o Options) saveLog(mem *memory.Memory, pl *planner.Planner, cause error) e
 		"ended":   time.Now().Format(time.RFC3339),
 		"cause":   causeStr,
 	}
+	if o.sense != nil {
+		payload["sense"] = o.sense.Snapshot("")
+	}
 	raw, _ := json.MarshalIndent(payload, "", "  ")
 	if err := os.WriteFile(name, raw, 0o644); err != nil {
 		return err
@@ -355,5 +632,9 @@ func clip(s string, n int) string {
 	return s
 }
 
-// suppress unused import warning for sync in some build paths.
-var _ = sync.Mutex{}
+func orDash(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "-"
+	}
+	return s
+}

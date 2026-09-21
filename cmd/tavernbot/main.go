@@ -18,6 +18,7 @@ import (
 	"github.com/jingx8885/lov-evo/internal/audio"
 	"github.com/jingx8885/lov-evo/internal/avatar"
 	"github.com/jingx8885/lov-evo/internal/config"
+	"github.com/jingx8885/lov-evo/internal/desk"
 	"github.com/jingx8885/lov-evo/internal/jev"
 	"github.com/jingx8885/lov-evo/internal/judge"
 	"github.com/jingx8885/lov-evo/internal/livevoice"
@@ -25,6 +26,7 @@ import (
 	"github.com/jingx8885/lov-evo/internal/memory"
 	"github.com/jingx8885/lov-evo/internal/persona"
 	"github.com/jingx8885/lov-evo/internal/planner"
+	"github.com/jingx8885/lov-evo/internal/sense"
 )
 
 func main() {
@@ -45,6 +47,10 @@ func main() {
 		os.Exit(cmdJudge(args))
 	case "plan":
 		os.Exit(cmdPlan(args))
+	case "desk":
+		os.Exit(cmdDesk(args))
+	case "codex":
+		os.Exit(cmdDesk(append([]string{"--driver", "codex"}, args...)))
 	case "doctor":
 		os.Exit(cmdDoctor(args))
 	case "ctxprobe":
@@ -53,6 +59,8 @@ func main() {
 		os.Exit(cmdLive2D(args))
 	case "loopprobe":
 		os.Exit(cmdLoopProbe(args))
+	case "sense":
+		os.Exit(cmdSense(args))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", cmd)
 		usage()
@@ -69,10 +77,13 @@ Commands:
   probe   connectivity check: call create, session.started, RTP echo
   judge   judge one text with Jev (no voice)
   plan    force one async planner refresh (prints the resulting note)
+  desk    Jev-driven computer use: snapshot, Cursor chat, or Codex exec
+  codex   skip Jev; drive Codex with gpt-5.6-luna on the new-api gateway
   doctor    local environment check (no network)
   ctxprobe  experiment with session.context.append channels
   live2d    serve the Haru viewer (Jev frames + lip sync over WebSocket)
   loopprobe closed-loop: inject speech uplink, wait for transcript + reply
+  sense      dump her self-snapshot, or read an allowlisted source file
 `)
 }
 
@@ -295,7 +306,7 @@ func cmdJudge(args []string) int {
 	p := mustPersona(*personaPath)
 	jc := jev.NewClient(config.ResolveBaseURL(*baseURL), mustKey(*key), "")
 	mem := memory.New(8)
-	jd, err := judge.JudgeTurn(context.Background(), jc, p, mem, *text)
+	jd, err := judge.JudgeTurn(context.Background(), jc, p, mem, *text, "")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -343,6 +354,67 @@ func cmdPlan(args []string) int {
 		time.Sleep(200 * time.Millisecond)
 	}
 	fmt.Println("note:", pl.Current())
+	return 0
+}
+
+func cmdDesk(args []string) int {
+	fs := flag.NewFlagSet("desk", flag.ExitOnError)
+	baseURL, _, key, _ := commonFlags(fs)
+	jevModel := fs.String("jev-model", config.DefaultJevModel, "System One model")
+	textModel := fs.String("planner-model", config.DefaultPlannerModel, "LLM for generated prompts")
+	goal := fs.String("goal", "", "what to do on this machine")
+	cwd := fs.String("cwd", "", "workspace directory (default: current)")
+	prefer := fs.String("prefer", "", "cursor or codex (Jev loop hint)")
+	driver := fs.String("driver", "", "jev (default) or codex to skip Jev and run Codex as gpt-5.6-luna")
+	codexModel := fs.String("codex-model", config.DefaultPlannerModel, "model Codex exec uses")
+	maxSteps := fs.Int("max-steps", 8, "max Jev decision steps")
+	dry := fs.Bool("dry-run", false, "decide only; do not click, type, or run Codex")
+	snapshot := fs.Bool("snapshot", false, "print desktop snapshot and exit")
+	fs.Parse(args)
+
+	if *snapshot {
+		snap, err := desk.DefaultHost{}.Snapshot(*cwd)
+		raw, _ := json.MarshalIndent(snap, "", "  ")
+		fmt.Println(string(raw))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if strings.TrimSpace(*goal) == "" {
+		fmt.Fprintln(os.Stderr, "--goal required (or use --snapshot)")
+		return 2
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	base := config.ResolveBaseURL(*baseURL)
+	k := mustKey(*key)
+	opt := desk.Options{
+		Goal:       *goal,
+		Cwd:        *cwd,
+		Prefer:     *prefer,
+		Driver:     *driver,
+		CodexModel: *codexModel,
+		APIKey:     k,
+		MaxSteps:   *maxSteps,
+		DryRun:     *dry,
+		LLM:        llm.NewClient(base, k, *textModel),
+		LogFn:      func(s string) { fmt.Println("[desk]", s) },
+	}
+	if !strings.EqualFold(strings.TrimSpace(*driver), "codex") {
+		opt.Jev = jev.NewClient(base, k, *jevModel)
+	}
+	rep, err := desk.Run(ctx, opt)
+	if rep != nil {
+		raw, _ := json.MarshalIndent(rep, "", "  ")
+		fmt.Println(string(raw))
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 	return 0
 }
 
@@ -398,6 +470,22 @@ func cmdDoctor(args []string) int {
 	} else {
 		fmt.Println("live2d:", dir)
 	}
+	tools := desk.DetectTools()
+	if tools.Cursor != "" {
+		fmt.Println("cursor:", tools.Cursor)
+	} else {
+		fmt.Println("cursor: missing")
+	}
+	if tools.Codex != "" {
+		fmt.Println("codex:", tools.Codex)
+	} else {
+		fmt.Println("codex: missing")
+	}
+	if root, err := sense.FindRoot(""); err != nil {
+		fmt.Println("sense:", err)
+	} else {
+		fmt.Println("sense:", root)
+	}
 	return 0
 }
 
@@ -443,6 +531,45 @@ func cmdCtxProbe(args []string) int {
 		case <-time.After(300 * time.Millisecond):
 		}
 	}
+	return 0
+}
+
+func cmdSense(args []string) int {
+	fs := flag.NewFlagSet("sense", flag.ExitOnError)
+	root := fs.String("root", "", "repo root (default: walk from cwd)")
+	file := fs.String("file", "", "read an allowlisted source file from her body")
+	tree := fs.Bool("tree", false, "print body map only")
+	fs.Parse(args)
+
+	bus, err := sense.Open(sense.Options{Root: *root})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer bus.Close()
+	bus.Set(func(l *sense.Live) { l.Voice = "idle" })
+
+	if *file != "" {
+		view, err := bus.Read(*file, 0)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		raw, _ := json.MarshalIndent(view, "", "  ")
+		fmt.Println(string(raw))
+		return 0
+	}
+	if *tree {
+		raw, _ := json.MarshalIndent(bus.BodyMap(), "", "  ")
+		fmt.Println(string(raw))
+		return 0
+	}
+	who := "小春"
+	if p, err := persona.Load("personas/haru.yaml"); err == nil {
+		who = p.Name
+	}
+	raw, _ := json.MarshalIndent(bus.Snapshot(who), "", "  ")
+	fmt.Println(string(raw))
 	return 0
 }
 
@@ -669,13 +796,14 @@ done:
 	if strings.TrimSpace(user) != "" {
 		jc := jev.NewClient(config.ResolveBaseURL(*baseURL), mustKey(*key), "")
 		mem := memory.New(8)
-		if jd, jerr := judge.JudgeTurn(ctx, jc, p, mem, user); jerr != nil {
+		if jd, jerr := judge.JudgeTurn(ctx, jc, p, mem, user, ""); jerr != nil {
 			result["jev"] = jerr.Error()
 		} else {
 			result["jev_emotion"] = jd.Emotion
 			result["jev_valence"] = jd.Valence
 			result["jev_arousal"] = jd.Arousal
 			result["jev_engage"] = jd.Engagement
+			result["jev_need_llm"] = jd.NeedLLMP
 			result["jev_mode"] = judge.DecideMode(jd, mem.Affect(), p.Judge.SafetyThresh, "")
 		}
 	}

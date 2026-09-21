@@ -81,6 +81,20 @@ func TestHubDriveAndWS(t *testing.T) {
 		t.Fatalf("ws %+v", pushed)
 	}
 
+	h.SetSense(func() any { return map[string]any{"who": "小春", "voice": "up"} })
+	senseResp, err := http.Get(srv.URL + "/api/sense")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer senseResp.Body.Close()
+	var snap map[string]any
+	if err := json.NewDecoder(senseResp.Body).Decode(&snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap["who"] != "小春" {
+		t.Fatalf("sense %+v", snap)
+	}
+
 	h.Mouth(0.73)
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -101,6 +115,25 @@ func TestHubDriveAndWS(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("no lipsync frame")
 		}
+	}
+
+	held := 0
+	holdDeadline := time.Now().Add(220 * time.Millisecond)
+	for time.Now().Before(holdDeadline) {
+		_ = conn.SetReadDeadline(time.Now().Add(120 * time.Millisecond))
+		var msg map[string]any
+		if err := conn.ReadJSON(&msg); err != nil {
+			break
+		}
+		if msg["type"] == "lipsync" {
+			mouth, _ := msg["mouth"].(float64)
+			if mouth >= 0.7 {
+				held++
+			}
+		}
+	}
+	if held < 2 {
+		t.Fatalf("held lipsync frames %d, want keepalive while mouth is open", held)
 	}
 }
 

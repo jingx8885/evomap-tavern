@@ -33,6 +33,8 @@ type Hub struct {
 	last    Frame
 	mouth   atomic.Uint64
 	mouthAt atomic.Int64
+	senseFn atomic.Value // func() any
+	eyeFn   atomic.Value // func(source string, jpegDataURL string)
 }
 
 type client struct {
@@ -75,7 +77,7 @@ func (h *Hub) Publish(f Frame) {
 	}
 }
 
-const mouthHold = 180 * time.Millisecond
+const mouthHold = 320 * time.Millisecond
 
 // Mouth publishes a 0..1 lip-sync value. The WS writer coalesces at ~20Hz.
 func (h *Hub) Mouth(v float64) {
@@ -91,6 +93,22 @@ func (h *Hub) MouthValue() float64 {
 		return 0
 	}
 	return math.Float64frombits(h.mouth.Load())
+}
+
+// SetSense registers GET /api/sense payload (her current self-snapshot).
+func (h *Hub) SetSense(fn func() any) {
+	if h == nil {
+		return
+	}
+	h.senseFn.Store(fn)
+}
+
+// SetEye registers a handler for camera/screen JPEGs from the viewer.
+func (h *Hub) SetEye(fn func(source, dataURL string)) {
+	if h == nil {
+		return
+	}
+	h.eyeFn.Store(fn)
 }
 
 // PCM pushes a downlink s16le 24kHz chunk to every viewer for WebAudio playback.
@@ -124,8 +142,19 @@ func (h *Hub) Handler(dir string) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(h.Last())
 	})
+	mux.HandleFunc("/api/sense", h.serveSense)
 	mux.HandleFunc("/drive", h.serveDrive)
 	return mux
+}
+
+func (h *Hub) serveSense(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	fn, _ := h.senseFn.Load().(func() any)
+	if fn == nil {
+		json.NewEncoder(w).Encode(map[string]any{"ok": false})
+		return
+	}
+	json.NewEncoder(w).Encode(fn())
 }
 
 func (h *Hub) serveDrive(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +174,7 @@ func (h *Hub) serveDrive(w http.ResponseWriter, r *http.Request) {
 		Emotion:    in.Emotion,
 		Engagement: in.Engagement,
 		SafetyP:    in.SafetyP,
+		NeedLLMP:   in.NeedLLM,
 	}
 	if j.Emotion == "" {
 		j.Emotion = "neutral"
@@ -205,7 +235,9 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 				}
 			case <-mouthTick.C:
 				v := h.MouthValue()
-				if math.Abs(v-lastMouth) < 0.02 {
+				// Keep sending while the mouth is open: the viewer times out
+				// if a held syllable looks unchanged for ~400ms.
+				if math.Abs(v-lastMouth) < 0.015 && v < 0.01 && lastMouth >= 0 {
 					continue
 				}
 				lastMouth = v

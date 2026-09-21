@@ -13,13 +13,14 @@ import (
 )
 
 const (
-	waveMapper      = 0xFFFFFFFF
-	waveFormatPCM   = 1
-	whdrDone        = 0x00000001
-	mmsyserrNoErr   = 0
-	winmmFrameBytes = DownlinkRate * 2 / 50 // 20ms of s16le mono
-	winmmOutBufs    = 12
-	winmmPrimeBytes = winmmFrameBytes * 5 // ~100ms before the device starts
+	waveMapper         = 0xFFFFFFFF
+	waveFormatPCM      = 1
+	whdrDone           = 0x00000001
+	mmsyserrNoErr      = 0
+	winmmSrcFrameBytes = DownlinkRate * 2 / 50 // 20ms of 24kHz s16le
+	winmmFrameBytes    = PlayRate * 2 / 50     // 20ms of 48kHz s16le
+	winmmOutBufs       = 12
+	winmmPrimeBytes    = winmmSrcFrameBytes * 5 // ~100ms of source before start
 )
 
 type waveFormatEx struct {
@@ -73,12 +74,20 @@ var (
 )
 
 func openWinmmPlayer() *Player {
+	event, err := createAutoEvent()
+	hasEvent := err == nil && event != 0
+	var cb, flags uintptr
+	if hasEvent {
+		cb = uintptr(event)
+		flags = callbackEvent
+	}
+
 	var hwo uintptr
 	wfx := waveFormatEx{
 		FormatTag:      waveFormatPCM,
 		Channels:       1,
-		SamplesPerSec:  DownlinkRate,
-		AvgBytesPerSec: uint32(DownlinkRate * 2),
+		SamplesPerSec:  PlayRate,
+		AvgBytesPerSec: uint32(PlayRate * 2),
 		BlockAlign:     2,
 		BitsPerSample:  16,
 	}
@@ -86,9 +95,12 @@ func openWinmmPlayer() *Player {
 		uintptr(unsafe.Pointer(&hwo)),
 		uintptr(waveMapper),
 		uintptr(unsafe.Pointer(&wfx)),
-		0, 0, 0,
+		cb, 0, flags,
 	)
 	if r != mmsyserrNoErr || hwo == 0 {
+		if hasEvent {
+			_ = windows.CloseHandle(event)
+		}
 		_ = err
 		return nil
 	}
@@ -98,7 +110,10 @@ func openWinmmPlayer() *Player {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		winmmLoop(hwo, in, stopCh)
+		if hasEvent {
+			defer windows.CloseHandle(event)
+		}
+		winmmLoop(hwo, in, stopCh, event)
 	}()
 
 	p := &Player{kind: "winmm"}
@@ -133,7 +148,7 @@ type winmmOutBuf struct {
 	busy bool
 }
 
-func winmmLoop(hwo uintptr, in <-chan []byte, stop <-chan struct{}) {
+func winmmLoop(hwo uintptr, in <-chan []byte, stop <-chan struct{}, event windows.Handle) {
 	defer func() {
 		_, _, _ = procWaveOutReset.Call(hwo)
 		_, _, _ = procWaveOutClose.Call(hwo)
@@ -149,15 +164,13 @@ func winmmLoop(hwo uintptr, in <-chan []byte, stop <-chan struct{}) {
 		pin.Pin(&bufs[i].hdr)
 	}
 
-	acc := make([]byte, 0, winmmFrameBytes*16)
+	acc := make([]byte, 0, winmmSrcFrameBytes*16)
 	primed := false
-	tick := time.NewTicker(2 * time.Millisecond)
-	defer tick.Stop()
 	for {
 		winmmRecycle(hwo, bufs)
 		// After an utterance the device drains. Starting the next one
 		// from a single 20ms buffer underruns immediately (stutter).
-		if primed && len(acc) < winmmFrameBytes && !winmmAnyBusy(bufs) {
+		if primed && len(acc) < winmmSrcFrameBytes && !winmmAnyBusy(bufs) {
 			primed = false
 		}
 		if !primed && len(acc) >= winmmPrimeBytes {
@@ -176,7 +189,12 @@ func winmmLoop(hwo uintptr, in <-chan []byte, stop <-chan struct{}) {
 				return
 			}
 			acc = append(acc, pcm...)
-		case <-tick.C:
+		default:
+			if event != 0 {
+				_, _ = windows.WaitForSingleObject(event, 2)
+			} else {
+				time.Sleep(2 * time.Millisecond)
+			}
 		}
 	}
 }
@@ -207,11 +225,12 @@ func winmmFill(hwo uintptr, bufs []winmmOutBuf, acc *[]byte) error {
 		if bufs[i].busy {
 			continue
 		}
-		if len(*acc) < winmmFrameBytes {
+		if len(*acc) < winmmSrcFrameBytes {
 			return nil
 		}
-		copy(bufs[i].pcm, (*acc)[:winmmFrameBytes])
-		*acc = (*acc)[winmmFrameBytes:]
+		up := UpsampleS16LE2x((*acc)[:winmmSrcFrameBytes])
+		*acc = (*acc)[winmmSrcFrameBytes:]
+		copy(bufs[i].pcm, up)
 		bufs[i].hdr.Flags = 0
 		bufs[i].hdr.BytesRecorded = 0
 		r, _, err := procWaveOutPrepare.Call(hwo, uintptr(unsafe.Pointer(&bufs[i].hdr)), size)

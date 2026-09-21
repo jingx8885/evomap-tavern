@@ -62,6 +62,13 @@ dd {
   margin: 0;
   font-variant-numeric: tabular-nums;
 }
+#self {
+  max-width: 140px;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 #hint {
   color: var(--muted);
   font-size: 12px;

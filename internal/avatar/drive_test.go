@@ -20,38 +20,50 @@ func TestDriveComfortUsesSoftFace(t *testing.T) {
 	if f.LookAt != 0.8 {
 		t.Fatalf("look_at %v", f.LookAt)
 	}
-	if f.Intensity > 0.5 {
-		t.Fatalf("comfort should be low intensity, got %v", f.Intensity)
+	if f.Valence != 0.2 {
+		t.Fatalf("face valence should be this turn's Jev score, got %v", f.Valence)
 	}
 }
 
 func TestDriveCelebrateIsBright(t *testing.T) {
 	j := &judge.Judgment{Emotion: "joy", Valence: 0.9, Arousal: 0.7, Engagement: 0.9}
 	f := Drive("celebrate", j, memory.Affect{Valence: 0.85, Arousal: 0.7})
-	if f.Expression != ExpBright {
+	if f.Expression != ExpBright && f.Expression != ExpPlay {
 		t.Fatalf("celebrate expression %s", f.Expression)
 	}
 	if f.MotionGroup != "TapBody" {
 		t.Fatalf("celebrate motion %s", f.MotionGroup)
 	}
-	if f.Intensity != 1 {
-		t.Fatalf("intensity %v", f.Intensity)
+	if f.Params["ParamMouthForm"] <= 0 || f.Params["ParamTere"] <= 0 {
+		t.Fatalf("joy overlay %+v", f.Params)
 	}
 }
 
 func TestDriveSafetyOverridesJoyFace(t *testing.T) {
-	j := &judge.Judgment{Emotion: "joy", Engagement: 0.4, SafetyP: 0.9}
+	j := &judge.Judgment{Emotion: "joy", Valence: 0.9, Engagement: 0.4, SafetyP: 0.9}
 	f := Drive("safety", j, memory.Affect{})
 	if f.Expression != ExpSoft {
 		t.Fatalf("safety must not copy user joy, got %s", f.Expression)
 	}
 }
 
-func TestDriveContinueFallsBackToEmotion(t *testing.T) {
-	j := &judge.Judgment{Emotion: "anger", Arousal: 0.4, Engagement: 0.6}
-	f := Drive("continue", j, memory.Affect{Arousal: 0.4})
-	if f.Expression != ExpStern {
-		t.Fatalf("got %s", f.Expression)
+func TestDriveFaceFollowsJevEmotionNotMode(t *testing.T) {
+	anger := &judge.Judgment{Emotion: "anger", Valence: 0.2, Arousal: 0.4, Engagement: 0.5}
+	de := Drive("de_escalate", anger, memory.Affect{})
+	cont := Drive("continue", anger, memory.Affect{})
+	if de.Expression != ExpFrown {
+		t.Fatalf("anger should be frown, got %s", de.Expression)
+	}
+	if de.Expression != cont.Expression {
+		t.Fatalf("same Jev scores must share a face: de=%s continue=%s", de.Expression, cont.Expression)
+	}
+	joyPush := Drive("goal_push", &judge.Judgment{Emotion: "joy", Valence: 0.6, Arousal: 0.4}, memory.Affect{})
+	if joyPush.Expression != ExpBright && joyPush.Expression != ExpPlay {
+		t.Fatalf("joy under goal_push should stay a smile, got %s", joyPush.Expression)
+	}
+	fear := Drive("continue", &judge.Judgment{Emotion: "fear", Valence: 0.2, Arousal: 0.6}, memory.Affect{})
+	if fear.Expression != ExpWorry {
+		t.Fatalf("fear %s", fear.Expression)
 	}
 }
 
@@ -63,12 +75,20 @@ func TestDriveNilJudgment(t *testing.T) {
 }
 
 func TestDriveOverlayHoldsEmotion(t *testing.T) {
-	comfort := Drive("comfort", &judge.Judgment{Emotion: "sadness", Arousal: 0.3}, memory.Affect{})
+	comfort := Drive("comfort", &judge.Judgment{Emotion: "sadness", Valence: 0.2, Arousal: 0.3}, memory.Affect{})
 	if comfort.Params["ParamMouthForm"] >= 0 {
-		t.Fatalf("comfort overlay %+v", comfort.Params)
+		t.Fatalf("sadness overlay %+v", comfort.Params)
 	}
-	celeb := Drive("celebrate", &judge.Judgment{Emotion: "joy", Arousal: 0.7}, memory.Affect{})
+	celeb := Drive("celebrate", &judge.Judgment{Emotion: "joy", Valence: 0.9, Arousal: 0.7}, memory.Affect{})
 	if celeb.Params["ParamTere"] < 0.4 || celeb.Params["ParamMouthForm"] < 0.3 {
-		t.Fatalf("celebrate overlay %+v", celeb.Params)
+		t.Fatalf("joy overlay %+v", celeb.Params)
+	}
+}
+
+func TestDriveNeedLLMPassesThrough(t *testing.T) {
+	j := &judge.Judgment{Emotion: "neutral", NeedLLMP: 0.81}
+	f := Drive("continue", j, memory.Affect{})
+	if f.NeedLLM != 0.81 {
+		t.Fatalf("need_llm %v", f.NeedLLM)
 	}
 }
