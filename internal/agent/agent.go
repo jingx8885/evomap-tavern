@@ -16,6 +16,7 @@ import (
 	"github.com/jingx8885/lov-evo/internal/audio"
 	"github.com/jingx8885/lov-evo/internal/avatar"
 	"github.com/jingx8885/lov-evo/internal/desk"
+	"github.com/jingx8885/lov-evo/internal/eye"
 	"github.com/jingx8885/lov-evo/internal/jev"
 	"github.com/jingx8885/lov-evo/internal/judge"
 	"github.com/jingx8885/lov-evo/internal/livevoice"
@@ -43,8 +44,12 @@ type Options struct {
 	OpenViewer   bool
 	Say          string
 	SenseRoot    string
+	Vision       string
+	VisionModel  string
+	VisionEvery  time.Duration
 	avatarHub    *avatar.Hub
 	sense        *sense.Bus
+	eyes         *eye.Eyes
 }
 
 // Run starts a live voice session and processes turns until ctx is done.
@@ -92,10 +97,63 @@ func Run(ctx context.Context, opt Options) error {
 		}
 	}
 
+	cam, scr := eye.ParseSources(opt.Vision)
+	if strings.TrimSpace(opt.Vision) == "" {
+		cam, scr = p.Sense.Eyes, p.Sense.Eyes
+	}
+	if !p.Sense.Enabled || !p.Sense.Eyes {
+		cam, scr = false, false
+	}
+	if cam || scr {
+		visModel := opt.VisionModel
+		if visModel == "" {
+			visModel = opt.PlannerModel
+		}
+		vis := llm.NewClient(opt.BaseURL, opt.APIKey, visModel)
+		opt.eyes = eye.Start(ctx, eye.Options{
+			Camera:   cam,
+			Screen:   scr,
+			Interval: opt.VisionEvery,
+			Jev:      jevClient,
+			LLM:      vis,
+			LogFn:    func(s string) { opt.log("[eye] %s", s) },
+			OnSight: func(s eye.Sight) {
+				if opt.sense == nil {
+					return
+				}
+				opt.sense.Set(func(l *sense.Live) {
+					if s.Camera.Caption != "" {
+						l.Camera = s.Camera.Caption
+					}
+					if s.Screen.Caption != "" {
+						l.Screen = s.Screen.Caption
+					}
+				})
+				sum := s.Camera.Caption
+				if s.Screen.Caption != "" {
+					if sum != "" {
+						sum += " | "
+					}
+					sum += s.Screen.Caption
+				}
+				if strings.TrimSpace(sum) != "" {
+					opt.sense.Emit(sense.Event{Kind: sense.KindSee, Summary: clip(sum, 120)})
+				}
+			},
+		})
+		if opt.avatarHub != nil {
+			opt.avatarHub.SetEye(func(source, dataURL string) {
+				if err := opt.eyes.Push(source, dataURL); err != nil {
+					opt.log("[eye] push %s: %v", source, err)
+				}
+			})
+		}
+	}
+
 	cmds := make(chan string, 16)
 	go readStdin(ctx, cmds)
 	opt.log("commands: /say <text> (speak) /steer <text> (reinstruct) " +
-		"/goal <text> (plan) /look <file> (her source) /sense /desk <goal> " +
+		"/goal <text> (plan) /look <file> (her source) /see /sense /desk <goal> " +
 		"/codex <goal> (luna) /status /quit")
 
 	first := true
@@ -469,8 +527,9 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 	case line == "/status":
 		if opt.sense != nil {
 			live := opt.sense.Live()
-			opt.log("[status] voice=%s mode=%s face=%s turns=%d plan=%s",
-				live.Voice, orDash(live.Mode), orDash(live.Expression), live.Turns, pl.Current())
+			opt.log("[status] voice=%s mode=%s face=%s turns=%d plan=%s cam=%s scr=%s",
+				live.Voice, orDash(live.Mode), orDash(live.Expression), live.Turns, pl.Current(),
+				orDash(live.Camera), orDash(live.Screen))
 		} else {
 			opt.log("[status] plan=%s affect_state logged at exit", pl.Current())
 		}
@@ -503,6 +562,21 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 		if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskFile, File: view.Path}); felt != "" {
 			if err := sess.Steer(felt); err != nil {
 				opt.log("[look] steer failed: %v", err)
+			}
+		}
+	case line == "/see":
+		if opt.eyes == nil {
+			opt.log("eyes down (pass -vision=both and sense.eyes: true)")
+			break
+		}
+		s := opt.eyes.LookNow(ctx)
+		opt.log("[see] camera=%s screen=%s", clip(s.Camera.Caption, 80), clip(s.Screen.Caption, 80))
+		if opt.sense != nil {
+			opt.sense.Emit(sense.Event{Kind: sense.KindCommand, Summary: "/see"})
+			if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskSee}); felt != "" {
+				if err := sess.Steer(felt); err != nil {
+					opt.log("[see] steer failed: %v", err)
+				}
 			}
 		}
 	case strings.HasPrefix(line, "/say "):
@@ -566,7 +640,7 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 			opt.sense.Emit(sense.Event{Kind: sense.KindDesk, Summary: "codex " + rep.Status})
 		}()
 	default:
-		opt.log("unknown command (try /say /steer /goal /look /sense /desk /codex /status /quit)")
+		opt.log("unknown command (try /say /steer /goal /look /see /sense /desk /codex /status /quit)")
 	}
 	return false
 }

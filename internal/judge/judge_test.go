@@ -134,11 +134,11 @@ func TestJudgeTurnAgainstFakeServer(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"model": "jev-latest",
 			"answers": map[string]any{
-				"valence":     map[string]any{"type": "score", "score": 4, "legend": map[string]any{"0": "a", "1": "b", "2": "c", "3": "d", "4": "e"}},
-				"arousal":     map[string]any{"type": "score", "score": 2, "legend": map[string]any{"0": "a", "1": "b", "2": "c", "3": "d", "4": "e"}},
-				"emotion":     map[string]any{"type": "choice", "choice": "joy", "probabilities": map[string]float64{"joy": 0.9}},
-				"engagement":  map[string]any{"type": "score", "score": 4, "legend": map[string]any{"0": "a", "1": "b", "2": "c", "3": "d", "4": "e"}},
-				"safety":      map[string]any{"type": "noul", "noul": 0.01},
+				"valence":      map[string]any{"type": "score", "score": 4, "legend": map[string]any{"0": "a", "1": "b", "2": "c", "3": "d", "4": "e"}},
+				"arousal":      map[string]any{"type": "score", "score": 2, "legend": map[string]any{"0": "a", "1": "b", "2": "c", "3": "d", "4": "e"}},
+				"emotion":      map[string]any{"type": "choice", "choice": "joy", "probabilities": map[string]float64{"joy": 0.9}},
+				"engagement":   map[string]any{"type": "score", "score": 4, "legend": map[string]any{"0": "a", "1": "b", "2": "c", "3": "d", "4": "e"}},
+				"safety":       map[string]any{"type": "noul", "noul": 0.01},
 				"persona_fit":  map[string]any{"type": "noul", "noul": 0.9},
 				"need_llm":     map[string]any{"type": "noul", "noul": 0.12},
 				"intent":       map[string]any{"type": "choice", "choice": "share_good"},
