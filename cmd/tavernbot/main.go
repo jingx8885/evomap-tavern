@@ -44,6 +44,8 @@ func main() {
 		os.Exit(cmdPlan(args))
 	case "doctor":
 		os.Exit(cmdDoctor(args))
+	case "ctxprobe":
+		os.Exit(cmdCtxProbe(args))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", cmd)
 		usage()
@@ -310,6 +312,51 @@ func cmdDoctor(args []string) int {
 		fmt.Println("mic:", err)
 	} else {
 		fmt.Println("mic: device build")
+	}
+	return 0
+}
+
+// cmdCtxProbe experiments with session.context.append channels:
+// which ones are accepted silently, which trigger a spoken reply.
+func cmdCtxProbe(args []string) int {
+	fs := flag.NewFlagSet("ctxprobe", flag.ExitOnError)
+	baseURL, _, key, _ := commonFlags(fs)
+	channel := fs.String("channel", "context", "context channel name")
+	text := fs.String("text", "STEERING_NOTE: the user seems tired.", "context text")
+	respond := fs.Bool("respond", false, "also send response.create")
+	fs.Parse(args)
+	ctx := context.Background()
+	sess, err := livevoice.Connect(ctx, config.ResolveBaseURL(baseURL), mustKey(key),
+		"You are a probe.", "cove")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer sess.Close()
+	sess.Verbose = true
+	wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	if err := sess.WaitStarted(wctx); err != nil {
+		cancel()
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	cancel()
+	if err := sess.AppendContext(*channel, *text); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	fmt.Println("sent context.append channel=" + *channel)
+	if *respond {
+		_ = sess.Respond()
+		fmt.Println("sent response.create")
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case ev := <-sess.Events():
+			fmt.Printf("event kind=%s speaker=%s text=%.80s err=%v\n", ev.Kind, ev.Speaker, ev.Text, ev.Err)
+		case <-time.After(300 * time.Millisecond):
+		}
 	}
 	return 0
 }

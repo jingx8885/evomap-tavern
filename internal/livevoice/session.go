@@ -49,6 +49,7 @@ type Event struct {
 
 // Turn carries a completed turn's text.
 type Turn struct {
+	Role          string
 	UserText      string
 	AssistantText string
 }
@@ -332,15 +333,24 @@ func (s *Session) handleEvent(data []byte) {
 			return
 		}
 		speaker := detectSpeaker(ev)
+		// these events are cumulative snapshots of the
+		// current turn's text, not deltas - replace, don't append
 		if speaker == "user" {
+			s.turnUser.Reset()
 			s.turnUser.WriteString(text)
 		} else {
+			s.turnAssistant.Reset()
 			s.turnAssistant.WriteString(text)
 		}
+		s.interim.Reset()
 		s.interim.WriteString(text)
 		s.emit(Event{Kind: EventTranscript, Speaker: speaker, Text: text})
 	case "turn.done", "turn.completed", "response.done":
-		s.finishTurn()
+		role := ""
+		if tt, ok := ev["turn"].(map[string]any); ok {
+			role, _ = tt["role"].(string)
+		}
+		s.finishTurn(role)
 	case "session.usage.updated":
 		usage, _ := ev["usage"].(map[string]any)
 		s.emit(Event{Kind: EventUsage, Usage: usage})
@@ -351,7 +361,7 @@ func (s *Session) handleEvent(data []byte) {
 	}
 }
 
-func (s *Session) finishTurn() {
+func (s *Session) finishTurn(role string) {
 	user := s.turnUser.String()
 	assistant := s.turnAssistant.String()
 	if assistant == "" {
@@ -360,7 +370,7 @@ func (s *Session) finishTurn() {
 	s.turnUser.Reset()
 	s.turnAssistant.Reset()
 	s.interim.Reset()
-	s.emit(Event{Kind: EventTurnDone, Text: user,
+	s.emit(Event{Kind: EventTurnDone, Speaker: role, Text: user,
 		Usage: map[string]any{"assistant": assistant}})
 }
 
@@ -424,12 +434,28 @@ func (s *Session) Speak(text string) error {
 	})
 }
 
-// Steer updates session instructions mid-conversation.
-func (s *Session) Steer(instructions string) error {
+// AppendContext appends text to a context channel. The only channel
+// confirmed by the gateway contract is "speakable" (verbatim TTS);
+// other channels are experimental - see the ctxprobe command.
+func (s *Session) AppendContext(channel, text string) error {
 	return s.sendJSON(map[string]any{
-		"type":    "session.update",
-		"session": map[string]any{"instructions": instructions},
+		"type":    "session.context.append",
+		"channel": channel,
+		"content": []map[string]string{{"type": "input_text", "text": text}},
 	})
+}
+
+// Respond asks the model to produce a response turn.
+func (s *Session) Respond() error {
+	return s.sendJSON(map[string]any{"type": "response.create"})
+}
+
+// Steer pushes behavioral guidance mid-conversation through the
+// developer context channel. Upstream rejects session.update for
+// instructions after initialization, so we inject the steering note
+// as silent developer context instead.
+func (s *Session) Steer(guidance string) error {
+	return s.AppendContext("developer", guidance)
 }
 
 func (s *Session) sendJSON(v any) error {

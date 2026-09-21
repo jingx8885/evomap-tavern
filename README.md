@@ -77,7 +77,7 @@
 ## 协议事实（已验证）
 
 - 上行：`POST /v1/realtime/calls`（multipart sdp + session），SDP offer 必须保留结尾 CRLF；`session.model = gpt-live-1-boulder-alpha`。
-- 事件：`GET wss://…/v1/live/{call_id}`；`session.context.append` + `channel:"speakable"` 念文本；`session.update` 推 steering。
+- 事件：`GET wss://…/v1/live/{call_id}`；`session.context.append` + `channel:"speakable"` 念文本；`session.context.append` + `channel:"developer"` 推 steering（上游静默接受；`session.update` 初始化后不可改 instructions）。
 - 下行：`session.output_audio.delta` 是连续 PCM s16le 24kHz mono（含静音填充）。
 - 上行音频只走 WebRTC RTP（PCMU 8000），WS 音频事件会被上游拒绝。
 - 用户语音 transcript 依赖网关事件形态；当前实现对 user/assistant transcript 事件做了宽容解析，若网关不提供用户转录，Jev 退化为从最近 exchange 推断用户状态。
@@ -89,7 +89,7 @@
 1. `judge.JudgeTurn` 发一次 `/v1/systemone`，题型固定（score×3 + choice + noul×2），全部并行。
 2. `memory.UpdateAffect` 把 valence/arousal 折进 EMA，safety 置 sticky 标志。
 3. `judge.DecideMode` 选模式（safety > comfort/de_escalate/celebrate > re_engage > goal_push > continue）。
-4. `steering.Build` 组合成新 instructions，`session.update` 推给语音会话。
+4. `steering.Build` 组合成 guidance，`session.context.append` + `channel:"developer"` 注入语音会话。
 5. `planner.Tick` 每 N 轮问 Jev 是否到自然停顿且目标未尽；过了就异步让 LLM 刷新 plan note。
 
 阈值在 persona YAML 的 `judge.*` 和 `planner.*` 里改。
@@ -113,6 +113,7 @@
 ## 已知边界
 
 - `delegation.type` 只支持 `client`；`responses` 委派不可用。
+- `session.context.append` channel 只接受 speakable / commentary / developer；developer 静默注入不念出，是 steering 通道；`response.create` 需要 Responses delegation，不可用。
 - `session.output_audio.delta` 是连续时间线，不是只在说话时才发。
 - 麦克风采集默认关闭（`-tags tavern_mic` 开启）。
 - 安全判断是启发式：safety noul 超过阈值就进 comfort 模式，但不会替代真人介入。
