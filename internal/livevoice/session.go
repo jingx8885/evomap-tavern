@@ -82,6 +82,7 @@ type Session struct {
 	pcmBytes      atomic.Int64
 	pcmMu         sync.Mutex
 	pcmAll        []byte
+	playbackGate  audio.DownlinkGate
 	onPCMMu       sync.Mutex
 	onPCM         func([]byte)
 	echoN         atomic.Int64
@@ -488,16 +489,21 @@ func (s *Session) handleEvent(data []byte) {
 		if audio.ChunkHasVoice(pcm) {
 			s.duckMic()
 		}
-		// Downlink is a continuous 24kHz timeline. Skipping quiet deltas
-		// compresses speech and underruns the player.
+		playbackPCM := s.playbackGate.Filter(pcm)
 		if s.player != nil {
-			s.player.WritePCM(pcm)
+			// Keep pauses inside an utterance, but do not queue the gateway's
+			// continuous idle timeline. A burst of old silence otherwise sits
+			// in front of fresh speech and grows into seconds of downlink lag.
+			s.player.WritePCM(playbackPCM)
 		}
 		s.onPCMMu.Lock()
 		fn := s.onPCM
 		s.onPCMMu.Unlock()
 		if fn != nil {
-			fn(pcm)
+			// Use the same gated samples sent to the player. Feeding the
+			// raw gateway timeline here made the avatar move before sound
+			// whenever the speaker queue had accumulated stale audio.
+			fn(playbackPCM)
 		}
 	case etype == "turn.created":
 		// First transcript chunks often arrive *before* turn.created.

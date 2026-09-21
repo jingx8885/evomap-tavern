@@ -19,8 +19,9 @@ const (
 	mmsyserrNoErr      = 0
 	winmmSrcFrameBytes = DownlinkRate * 2 / 50 // 20ms of 24kHz s16le
 	winmmFrameBytes    = PlayRate * 2 / 50     // 20ms of 48kHz s16le
-	winmmOutBufs       = 12
-	winmmPrimeBytes    = winmmSrcFrameBytes * 5 // ~100ms of source before start
+	winmmOutBufs       = 6
+	winmmPrimeBytes    = winmmSrcFrameBytes * 3 // ~60ms: enough jitter cover without sluggish start
+	winmmMaxAccBytes   = winmmSrcFrameBytes * 8 // cap software backlog at ~160ms
 )
 
 type waveFormatEx struct {
@@ -105,7 +106,10 @@ func openWinmmPlayer() *Player {
 		return nil
 	}
 
-	in := make(chan []byte, 256)
+	// The gateway can deliver audio faster than real time. Keep this queue
+	// deliberately small: stale audio is worse than an occasional dropped
+	// frame for an interactive voice session.
+	in := make(chan []byte, 16)
 	stopCh := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -126,6 +130,18 @@ func openWinmmPlayer() *Player {
 		select {
 		case <-stopCh:
 		case in <- cp:
+		default:
+			// Drop the oldest queued chunk, then keep the newest audio.
+			// Never block the WebSocket reader behind speaker playback.
+			select {
+			case <-in:
+			default:
+			}
+			select {
+			case in <- cp:
+			case <-stopCh:
+			default:
+			}
 		}
 	}
 	var once atomic.Bool
@@ -189,6 +205,12 @@ func winmmLoop(hwo uintptr, in <-chan []byte, stop <-chan struct{}, event window
 				return
 			}
 			acc = append(acc, pcm...)
+			if len(acc) > winmmMaxAccBytes {
+				// Preserve the newest samples so a burst cannot turn into
+				// seconds of lip/audio skew.
+				copy(acc, acc[len(acc)-winmmMaxAccBytes:])
+				acc = acc[:winmmMaxAccBytes]
+			}
 		default:
 			if event != 0 {
 				_, _ = windows.WaitForSingleObject(event, 2)

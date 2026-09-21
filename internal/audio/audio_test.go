@@ -131,6 +131,58 @@ func TestChunkHasVoiceLeadingSpeech(t *testing.T) {
 	}
 }
 
+func TestDownlinkGateDropsIdleTimelineAndKeepsSpeechContext(t *testing.T) {
+	frame := func(sample int16) []byte {
+		pcm := make([]byte, mouthFrameBytes)
+		for i := 0; i < len(pcm); i += 2 {
+			binary.LittleEndian.PutUint16(pcm[i:], uint16(sample))
+		}
+		return pcm
+	}
+	quiet := frame(0)
+	voice := frame(22000)
+
+	var gate DownlinkGate
+	if got := gate.Filter(bytes.Repeat(quiet, 50)); len(got) != 0 {
+		t.Fatalf("idle silence leaked into playback: %d bytes", len(got))
+	}
+
+	got := gate.Filter(voice)
+	wantFrames := downlinkGatePreRollFrames + 1
+	if len(got) != wantFrames*mouthFrameBytes {
+		t.Fatalf("speech start bytes=%d want=%d", len(got), wantFrames*mouthFrameBytes)
+	}
+	if !ChunkHasVoice(got[len(got)-mouthFrameBytes:]) {
+		t.Fatal("speech frame was not preserved")
+	}
+
+	got = gate.Filter(bytes.Repeat(quiet, downlinkGateHangoverFrames+20))
+	if len(got) != downlinkGateHangoverFrames*mouthFrameBytes {
+		t.Fatalf("hangover bytes=%d want=%d", len(got), downlinkGateHangoverFrames*mouthFrameBytes)
+	}
+
+	got = gate.Filter(voice)
+	if len(got) != (downlinkGatePreRollFrames+1)*mouthFrameBytes {
+		t.Fatalf("resumed speech bytes=%d", len(got))
+	}
+}
+
+func TestDownlinkGateBuffersPartialFrames(t *testing.T) {
+	voice := make([]byte, mouthFrameBytes)
+	for i := 0; i < len(voice); i += 2 {
+		binary.LittleEndian.PutUint16(voice[i:], uint16(int16(22000)))
+	}
+
+	var gate DownlinkGate
+	if got := gate.Filter(voice[:100]); len(got) != 0 {
+		t.Fatalf("partial frame emitted early: %d", len(got))
+	}
+	got := gate.Filter(voice[100:])
+	if len(got) != mouthFrameBytes {
+		t.Fatalf("completed frame bytes=%d want=%d", len(got), mouthFrameBytes)
+	}
+}
+
 func TestMouthEnvelope(t *testing.T) {
 	if MouthEnvelope(1.5) != 0 {
 		t.Fatal("expected pause")

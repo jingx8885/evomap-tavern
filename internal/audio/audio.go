@@ -532,6 +532,75 @@ func MouthOpen(pcm []byte) float64 {
 
 const mouthFrameBytes = mouthWindow * 2
 
+const (
+	downlinkGatePreRollFrames  = 2 // keep 40ms before detected speech
+	downlinkGateHangoverFrames = 6 // keep pauses up to 120ms inside an utterance
+)
+
+// DownlinkGate removes the gateway's unbounded idle silence while preserving
+// short pauses inside speech. The downlink is a continuous PCM timeline, and
+// gateways may deliver a long idle prefix in a burst. Sending that prefix to
+// a real-time sound device makes every later response wait behind stale audio.
+//
+// Filter accepts arbitrarily sized s16le 24kHz chunks. It buffers incomplete
+// 20ms frames, so callers should keep one gate for the lifetime of a session.
+type DownlinkGate struct {
+	active      bool
+	quietFrames int
+	pending     []byte
+	preRoll     []byte
+}
+
+// Filter returns PCM that should be queued for playback. Idle silence is
+// omitted; speech, a small pre-roll, and short within-utterance pauses remain.
+func (g *DownlinkGate) Filter(pcm []byte) []byte {
+	if len(pcm) == 0 {
+		return nil
+	}
+	g.pending = append(g.pending, pcm...)
+	frames := len(g.pending) / mouthFrameBytes
+	if frames == 0 {
+		return nil
+	}
+
+	out := make([]byte, 0, frames*mouthFrameBytes)
+	for off := 0; off < frames*mouthFrameBytes; off += mouthFrameBytes {
+		frame := g.pending[off : off+mouthFrameBytes]
+		if ChunkHasVoice(frame) {
+			if !g.active {
+				out = append(out, g.preRoll...)
+				g.preRoll = g.preRoll[:0]
+				g.active = true
+			}
+			out = append(out, frame...)
+			g.quietFrames = 0
+			continue
+		}
+
+		if g.active {
+			out = append(out, frame...)
+			g.quietFrames++
+			if g.quietFrames >= downlinkGateHangoverFrames {
+				g.active = false
+				g.quietFrames = 0
+			}
+			continue
+		}
+
+		g.preRoll = append(g.preRoll, frame...)
+		maxPreRoll := downlinkGatePreRollFrames * mouthFrameBytes
+		if len(g.preRoll) > maxPreRoll {
+			copy(g.preRoll, g.preRoll[len(g.preRoll)-maxPreRoll:])
+			g.preRoll = g.preRoll[:maxPreRoll]
+		}
+	}
+
+	consumed := frames * mouthFrameBytes
+	copy(g.pending, g.pending[consumed:])
+	g.pending = g.pending[:len(g.pending)-consumed]
+	return out
+}
+
 // ChunkHasVoice reports whether any 20ms window looks like speech.
 // MouthOpen only inspects the trailing window (lip sync); ducking must
 // see leading speech or the mic stays open and barge-in cuts TTS.
