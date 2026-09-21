@@ -23,8 +23,8 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 
-	"github.com/jingx8885/evomap-tavern/internal/audio"
-	"github.com/jingx8885/evomap-tavern/internal/config"
+	"github.com/jingx8885/lov-evo/internal/audio"
+	"github.com/jingx8885/lov-evo/internal/config"
 )
 
 // Event kinds delivered on Session.Events.

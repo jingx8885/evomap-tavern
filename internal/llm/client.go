@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jingx8885/evomap-tavern/internal/config"
+	"github.com/jingx8885/lov-evo/internal/config"
 )
 
 // Client calls /chat/completions.

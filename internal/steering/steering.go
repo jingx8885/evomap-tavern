@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jingx8885/evomap-tavern/internal/judge"
-	"github.com/jingx8885/evomap-tavern/internal/memory"
-	"github.com/jingx8885/evomap-tavern/internal/persona"
+	"github.com/jingx8885/lov-evo/internal/judge"
+	"github.com/jingx8885/lov-evo/internal/memory"
+	"github.com/jingx8885/lov-evo/internal/persona"
 )
 
 // modeDirective is a behavioral nudge, not scripted text: the voice model

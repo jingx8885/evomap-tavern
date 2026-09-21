@@ -1,4 +1,4 @@
-# evomap-tavern
+# lov-evo
 
 **进化酒馆的人格对话机器人**：Jev（System One）做结构化情感判断与异步门控，LLM 做长期规划，OpenAI 双工语音（gpt-live）做对话。
 

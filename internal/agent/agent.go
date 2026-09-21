@@ -13,14 +13,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jingx8885/evomap-tavern/internal/jev"
-	"github.com/jingx8885/evomap-tavern/internal/judge"
-	"github.com/jingx8885/evomap-tavern/internal/livevoice"
-	"github.com/jingx8885/evomap-tavern/internal/llm"
-	"github.com/jingx8885/evomap-tavern/internal/memory"
-	"github.com/jingx8885/evomap-tavern/internal/persona"
-	"github.com/jingx8885/evomap-tavern/internal/planner"
-	"github.com/jingx8885/evomap-tavern/internal/steering"
+	"github.com/jingx8885/lov-evo/internal/jev"
+	"github.com/jingx8885/lov-evo/internal/judge"
+	"github.com/jingx8885/lov-evo/internal/livevoice"
+	"github.com/jingx8885/lov-evo/internal/llm"
+	"github.com/jingx8885/lov-evo/internal/memory"
+	"github.com/jingx8885/lov-evo/internal/persona"
+	"github.com/jingx8885/lov-evo/internal/planner"
+	"github.com/jingx8885/lov-evo/internal/steering"
 )
 
 // Options configures a run.

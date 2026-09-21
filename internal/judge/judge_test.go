@@ -7,9 +7,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/jingx8885/evomap-tavern/internal/jev"
-	"github.com/jingx8885/evomap-tavern/internal/memory"
-	"github.com/jingx8885/evomap-tavern/internal/persona"
+	"github.com/jingx8885/lov-evo/internal/jev"
+	"github.com/jingx8885/lov-evo/internal/memory"
+	"github.com/jingx8885/lov-evo/internal/persona"
 )
 
 func f(v float64) *float64 { return &v }

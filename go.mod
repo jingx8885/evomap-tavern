@@ -1,4 +1,4 @@
-module github.com/jingx8885/evomap-tavern
+module github.com/jingx8885/lov-evo
 
 go 1.24.0
 

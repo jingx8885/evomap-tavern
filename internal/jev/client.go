@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jingx8885/evomap-tavern/internal/config"
+	"github.com/jingx8885/lov-evo/internal/config"
 )
 
 const maxErrorBody = 2048

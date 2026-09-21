@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jingx8885/evomap-tavern/internal/judge"
-	"github.com/jingx8885/evomap-tavern/internal/memory"
-	"github.com/jingx8885/evomap-tavern/internal/persona"
+	"github.com/jingx8885/lov-evo/internal/judge"
+	"github.com/jingx8885/lov-evo/internal/memory"
+	"github.com/jingx8885/lov-evo/internal/persona"
 )
 
 func TestBuild(t *testing.T) {
