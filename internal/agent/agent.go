@@ -110,13 +110,21 @@ func Run(ctx context.Context, opt Options) error {
 			visModel = opt.PlannerModel
 		}
 		vis := llm.NewClient(opt.BaseURL, opt.APIKey, visModel)
+		host := desk.DefaultHost{}
 		opt.eyes = eye.Start(ctx, eye.Options{
 			Camera:   cam,
 			Screen:   scr,
 			Interval: opt.VisionEvery,
 			Jev:      jevClient,
 			LLM:      vis,
-			LogFn:    func(s string) { opt.log("[eye] %s", s) },
+			Observe: func(ctx context.Context) (eye.ScreenView, error) {
+				g, err := desk.Look(ctx, jevClient, host, "")
+				if err != nil {
+					return eye.ScreenView{}, err
+				}
+				return eye.ScreenView{Caption: g.Caption, Signature: g.Signature, Private: g.Private}, nil
+			},
+			LogFn: func(s string) { opt.log("[eye] %s", s) },
 			OnSight: func(s eye.Sight) {
 				if opt.sense == nil {
 					return

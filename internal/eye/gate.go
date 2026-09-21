@@ -49,13 +49,13 @@ func (e *Eyes) gate(ctx context.Context, src string, delta float64, lastCaption 
 		return out
 	}
 	state := map[string]any{
-		"source":        src,
-		"hash_delta":    delta,
-		"bytes":         bytes,
-		"width":         w,
-		"height":        h,
-		"last_caption":  lastCaption,
-		"note":          "Jev does not see pixels. Judge from the structured fields only.",
+		"source":       src,
+		"hash_delta":   delta,
+		"bytes":        bytes,
+		"width":        w,
+		"height":       h,
+		"last_caption": lastCaption,
+		"note":         "Jev does not see pixels. Judge from the structured fields only.",
 	}
 	res, err := e.opt.Jev.Evaluate(ctx, state, gateQuestions())
 	if err != nil {
@@ -80,19 +80,13 @@ func noulOf(a jev.Answer) float64 {
 	return *a.Noul
 }
 
-func describePrompt(source string) (system, user string) {
-	system = "You caption a single JPEG for a voice companion. One or two short Chinese sentences. " +
-		"No lists, no OCR dump, no speculation about identity. If the image is a screen, name the kind of app " +
-		"and the activity (coding, browser, desktop), not the full text. If it is a camera, say whether a person " +
-		"is visible, rough expression, and lighting. If private (passwords, banking), say only that it looks private."
-	switch source {
-	case SourceCamera:
-		user = "This is the camera pointed at the room. What do you see?"
-	case SourceScreen:
-		user = "This is the computer screen. What is the user looking at, in brief?"
-	default:
-		user = "What is in this picture, briefly?"
-	}
+func describePrompt() (system, user string) {
+	system = "You caption a single JPEG from a room camera for a voice companion. " +
+		"One or two short Chinese sentences. No lists, no speculation about identity. " +
+		"Say whether a person is visible, rough expression, and lighting. " +
+		"If private (passwords, banking on a phone), say only that it looks private. " +
+		"This is never a computer screenshot."
+	user = "This is the camera pointed at the room. What do you see?"
 	return system, user
 }
 

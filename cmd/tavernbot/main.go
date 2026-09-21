@@ -19,7 +19,6 @@ import (
 	"github.com/jingx8885/lov-evo/internal/avatar"
 	"github.com/jingx8885/lov-evo/internal/config"
 	"github.com/jingx8885/lov-evo/internal/desk"
-	"github.com/jingx8885/lov-evo/internal/eye"
 	"github.com/jingx8885/lov-evo/internal/jev"
 	"github.com/jingx8885/lov-evo/internal/judge"
 	"github.com/jingx8885/lov-evo/internal/livevoice"
@@ -74,7 +73,7 @@ func usage() {
 
 Commands:
   run     start the duplex voice loop (WebRTC uplink + WS events)
-          flags include -vision=both|camera|screen|off
+          flags include -vision=both|camera|screen|off (screen = Jev computer-use, not pixels)
   speak   one-shot TTS through the speakable channel, writes a WAV
   probe   connectivity check: call create, session.started, RTP echo
   judge   judge one text with Jev (no voice)
@@ -131,7 +130,7 @@ func cmdRun(args []string) int {
 	noBrowser := fs.Bool("no-browser", false, "do not open the Live2D viewer")
 	say := fs.String("say", "", "speak this text once after the session starts")
 	quitAfter := fs.Duration("quit-after", 0, "exit after this duration (0 = until Ctrl+C / /quit)")
-	vision := fs.String("vision", "both", "eyes: both, camera, screen, or off")
+	vision := fs.String("vision", "both", "eyes: both, camera, screen (computer-use), or off")
 	visionModel := fs.String("vision-model", config.DefaultVisionModel, "multimodal captioner")
 	visionEvery := fs.Duration("vision-every", 2*time.Second, "how often to sample camera/screen")
 	fs.Parse(args)
@@ -494,10 +493,10 @@ func cmdDoctor(args []string) int {
 	} else {
 		fmt.Println("sense:", root)
 	}
-	if n, err := eye.ProbeScreen(); err != nil {
-		fmt.Println("screen:", err)
+	if snap, err := (desk.DefaultHost{}).Snapshot(""); err != nil {
+		fmt.Println("desk:", err)
 	} else {
-		fmt.Printf("screen: jpeg %d bytes\n", n)
+		fmt.Printf("desk: fg=%s windows=%d\n", snap.ForegroundTitle, len(snap.Windows))
 	}
 	return 0
 }

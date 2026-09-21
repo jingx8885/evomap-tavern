@@ -53,33 +53,21 @@ func TestThumbDeltaDetectsChange(t *testing.T) {
 
 func TestParallelCameraAndScreen(t *testing.T) {
 	var vlm atomic.Int32
-	var sights []Sight
-	var muN int
 	llm := fakeVision{fn: func(_ context.Context, _, src string, _ []byte) (string, error) {
 		vlm.Add(1)
-		if strings.Contains(src, "camera") {
-			return "摄像头里有个人坐着。", nil
-		}
-		return "屏幕在写 Go 代码。", nil
+		return "摄像头里有个人坐着。", nil
 	}}
-	jev := fakeEval{noteworthy: 0.9, private: 0.1, mention: 0.1}
-	grabN := atomic.Int32{}
+	obsN := atomic.Int32{}
 	e := New(Options{
 		Camera:   true,
 		Screen:   true,
 		Interval: 30 * time.Millisecond,
 		Cooldown: time.Millisecond,
-		Jev:      jev,
+		Jev:      fakeEval{noteworthy: 0.9, private: 0.1, mention: 0.1},
 		LLM:      llm,
-		Grab: func() ([]byte, error) {
-			grabN.Add(1)
-			return SolidJPEG(40, 24, color.RGBA{R: 40, G: 80, B: 120, A: 255}), nil
-		},
-		OnSight: func(s Sight) {
-			if s.Camera.Caption != "" || s.Screen.Caption != "" {
-				sights = append(sights, s)
-				muN++
-			}
+		Observe: func(context.Context) (ScreenView, error) {
+			obsN.Add(1)
+			return ScreenView{Caption: "前台 Cursor · lov-evo（coding）", Signature: "sig1"}, nil
 		},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -101,19 +89,27 @@ func TestParallelCameraAndScreen(t *testing.T) {
 	}
 	s := e.Snapshot()
 	if s.Camera.Caption == "" || s.Screen.Caption == "" {
-		t.Fatalf("expected both captions, got %+v vlm=%d grabs=%d", s, vlm.Load(), grabN.Load())
+		t.Fatalf("expected both captions, got %+v vlm=%d obs=%d", s, vlm.Load(), obsN.Load())
 	}
 	if !strings.Contains(s.Camera.Caption, "摄像头") {
 		t.Fatalf("camera caption %q", s.Camera.Caption)
 	}
-	if !strings.Contains(s.Screen.Caption, "屏幕") {
-		t.Fatalf("screen caption %q", s.Screen.Caption)
+	if !strings.Contains(s.Screen.Caption, "Cursor") {
+		t.Fatalf("screen should be computer-use, got %q", s.Screen.Caption)
 	}
-	if vlm.Load() < 2 {
-		t.Fatalf("vlm calls %d, want both sources", vlm.Load())
+	if vlm.Load() != 1 {
+		t.Fatalf("vlm calls %d, want camera only", vlm.Load())
 	}
-	if grabN.Load() < 1 {
-		t.Fatal("screen grab never ran")
+	if obsN.Load() < 1 {
+		t.Fatal("computer-use observer never ran")
+	}
+}
+
+func TestPushRejectsScreenJPEG(t *testing.T) {
+	e := New(Options{})
+	err := e.Push(SourceScreen, "data:image/jpeg;base64,aaaa")
+	if err == nil {
+		t.Fatal("screen JPEG should be rejected")
 	}
 }
 
@@ -143,17 +139,14 @@ func TestGateSkipsPrivate(t *testing.T) {
 }
 
 func TestLookNowCaptionsBoth(t *testing.T) {
-	llm := fakeVision{fn: func(_ context.Context, _, user string, _ []byte) (string, error) {
-		if strings.Contains(user, "camera") || strings.Contains(user, "摄像头") {
-			return "看见你了。", nil
-		}
-		return "桌面。", nil
+	llm := fakeVision{fn: func(context.Context, string, string, []byte) (string, error) {
+		return "看见你了。", nil
 	}}
 	e := New(Options{
 		Screen: true,
 		LLM:    llm,
-		Grab: func() ([]byte, error) {
-			return SolidJPEG(16, 16, color.Gray{Y: 90}), nil
+		Observe: func(context.Context) (ScreenView, error) {
+			return ScreenView{Caption: "前台 notepad", Signature: "np"}, nil
 		},
 	})
 	if err := e.pushJPEG(SourceCamera, SolidJPEG(16, 16, color.Gray{Y: 20})); err != nil {
@@ -162,6 +155,9 @@ func TestLookNowCaptionsBoth(t *testing.T) {
 	s := e.LookNow(context.Background())
 	if s.Camera.Caption == "" || s.Screen.Caption == "" {
 		t.Fatalf("%+v", s)
+	}
+	if !strings.Contains(s.Screen.Caption, "notepad") {
+		t.Fatalf("screen %q", s.Screen.Caption)
 	}
 }
 

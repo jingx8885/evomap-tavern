@@ -18,6 +18,7 @@ type Eyes struct {
 	thumbs map[string][]byte
 	lastV  map[string]time.Time
 	dirty  map[string]bool
+	scrSig string
 }
 
 // New builds a stopped pair. Start launches the goroutines.
@@ -45,7 +46,7 @@ func Start(ctx context.Context, opt Options) *Eyes {
 		go e.sampleScreen(ctx)
 	}
 	go e.loop(ctx)
-	e.log("eyes up camera=%v screen=%v every=%s", opt.Camera, opt.Screen, opt.Interval)
+	e.log("eyes up camera=%v screen=computer-use every=%s", opt.Camera, opt.Interval)
 	return e
 }
 
@@ -55,8 +56,8 @@ func (e *Eyes) Push(source, dataURL string) error {
 		return fmt.Errorf("eyes down")
 	}
 	source = normalizeSource(source)
-	if source == "" {
-		return fmt.Errorf("unknown eye source")
+	if source != SourceCamera {
+		return fmt.Errorf("only camera frames are accepted; screen is computer-use")
 	}
 	raw, err := DecodeDataURL(dataURL)
 	if err != nil {
@@ -90,34 +91,27 @@ func (e *Eyes) Snapshot() Sight {
 	}
 }
 
-// LookNow forces a caption of whatever frames are currently held.
+// LookNow forces a camera caption and a computer-use screen glance.
 func (e *Eyes) LookNow(ctx context.Context) Sight {
 	if e == nil {
 		return Sight{}
 	}
+	var wg sync.WaitGroup
 	if e.opt.Screen {
-		if raw, err := e.grabScreen(); err == nil {
-			_ = e.pushJPEG(SourceScreen, raw)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			e.refreshScreen(ctx, true)
+		}()
 	}
 	e.mu.Lock()
 	cam := e.latest[SourceCamera]
-	scr := e.latest[SourceScreen]
 	e.mu.Unlock()
-
-	var wg sync.WaitGroup
 	if len(cam.JPEG) > 0 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			e.describe(ctx, cam, true)
-		}()
-	}
-	if len(scr.JPEG) > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			e.describe(ctx, scr, true)
 		}()
 	}
 	wg.Wait()
@@ -127,41 +121,60 @@ func (e *Eyes) LookNow(ctx context.Context) Sight {
 }
 
 func (e *Eyes) sampleScreen(ctx context.Context) {
-	fail := 0
+	e.refreshScreen(ctx, false)
 	tick := time.NewTicker(e.opt.Interval)
 	defer tick.Stop()
-	if raw, err := e.grabScreen(); err != nil {
-		e.log("screen: %v", err)
-		fail++
-	} else if err := e.pushJPEG(SourceScreen, raw); err != nil {
-		e.log("screen encode: %v", err)
-	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			raw, err := e.grabScreen()
-			if err != nil {
-				fail++
-				if fail == 1 || fail%12 == 0 {
-					e.log("screen: %v", err)
-				}
-				continue
-			}
-			fail = 0
-			if err := e.pushJPEG(SourceScreen, raw); err != nil {
-				e.log("screen encode: %v", err)
-			}
+			e.refreshScreen(ctx, false)
 		}
 	}
 }
 
-func (e *Eyes) grabScreen() ([]byte, error) {
-	if e.opt.Grab != nil {
-		return e.opt.Grab()
+func (e *Eyes) refreshScreen(ctx context.Context, force bool) {
+	view, err := e.observe(ctx)
+	if err != nil {
+		e.log("screen: %v", err)
+		return
 	}
-	return captureScreenJPEG(maxScreenEdge)
+	e.mu.Lock()
+	same := !force && view.Signature != "" && view.Signature == e.scrSig && e.seen[SourceScreen].Caption != ""
+	if !force && !same {
+		lastAt := e.lastV[SourceScreen]
+		if e.seen[SourceScreen].Caption != "" && !lastAt.IsZero() && time.Since(lastAt) < e.opt.Cooldown && view.Signature == e.scrSig {
+			same = true
+		}
+	}
+	if same {
+		e.mu.Unlock()
+		return
+	}
+	e.scrSig = view.Signature
+	g := Glimpse{
+		Source:  SourceScreen,
+		Caption: clipCaption(view.Caption, 180),
+		At:      time.Now(),
+		Ready:   true,
+		Private: view.Private,
+	}
+	if g.Caption == "" {
+		g.Caption = "桌面窗口快照还是空的"
+	}
+	e.seen[SourceScreen] = g
+	e.lastV[SourceScreen] = time.Now()
+	e.mu.Unlock()
+	e.log("screen: %s", g.Caption)
+	e.emit(e.Snapshot())
+}
+
+func (e *Eyes) observe(ctx context.Context) (ScreenView, error) {
+	if e.opt.Observe != nil {
+		return e.opt.Observe(ctx)
+	}
+	return ScreenView{}, fmt.Errorf("no computer-use observer")
 }
 
 func (e *Eyes) loop(ctx context.Context) {
@@ -255,7 +268,7 @@ func (e *Eyes) describe(ctx context.Context, f Frame, mention bool) {
 	if e.opt.LLM == nil || len(f.JPEG) == 0 {
 		return
 	}
-	sys, user := describePrompt(f.Source)
+	sys, user := describePrompt()
 	text, err := e.opt.LLM.ChatVision(ctx, sys, user, f.JPEG)
 	if err != nil {
 		e.log("%s vlm: %v", f.Source, err)
@@ -289,15 +302,6 @@ func (e *Eyes) emit(s Sight) {
 	e.opt.OnSight(s)
 }
 
-// ProbeScreen captures one desktop JPEG and returns its size. Used by doctor.
-func ProbeScreen() (int, error) {
-	raw, err := captureScreenJPEG(maxScreenEdge)
-	if err != nil {
-		return 0, err
-	}
-	return len(raw), nil
-}
-
 func (e *Eyes) log(format string, args ...any) {
 	if e.opt.LogFn == nil {
 		return
@@ -309,8 +313,6 @@ func normalizeSource(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case SourceCamera, "cam", "webcam":
 		return SourceCamera
-	case SourceScreen, "scr", "desktop", "display":
-		return SourceScreen
 	default:
 		return ""
 	}

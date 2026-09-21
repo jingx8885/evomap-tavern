@@ -235,3 +235,74 @@ func TestUnsafeIsBlocked(t *testing.T) {
 		t.Fatalf("executed %v", host.calls)
 	}
 }
+
+func TestLookUsesComputerUseSnapshotNotPixels(t *testing.T) {
+	host := &recHost{snap: Snapshot{
+		ForegroundHWND:  11,
+		ForegroundTitle: "lov-evo — Cursor",
+		Windows: []Window{
+			{ID: "w1", HWND: 11, Process: "Cursor", Title: "lov-evo — Cursor"},
+			{ID: "w2", HWND: 22, Process: "chrome", Title: "GitHub"},
+		},
+	}}
+	g, err := Look(context.Background(), &fakeGlanceJev{activity: "coding", private: 0.1}, host, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Activity != "coding" || g.Private {
+		t.Fatalf("%+v", g)
+	}
+	if !strings.Contains(g.Caption, "Cursor") || !strings.Contains(g.Caption, "coding") {
+		t.Fatalf("caption %q", g.Caption)
+	}
+	if !strings.Contains(g.Caption, "GitHub") {
+		t.Fatalf("should mention other windows: %q", g.Caption)
+	}
+	if len(host.calls) != 0 {
+		t.Fatalf("Look must not click: %v", host.calls)
+	}
+}
+
+func TestLookMarksPrivate(t *testing.T) {
+	host := &recHost{snap: Snapshot{
+		ForegroundTitle: "1Password",
+		Windows:         []Window{{ID: "w1", Process: "1Password", Title: "1Password"}},
+	}}
+	g, err := Look(context.Background(), &fakeGlanceJev{activity: "other", private: 0.9}, host, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !g.Private || !strings.Contains(g.Caption, "私人") {
+		t.Fatalf("%+v", g)
+	}
+}
+
+func TestLookWithoutJevStillCaptionsTitles(t *testing.T) {
+	host := &recHost{snap: Snapshot{ForegroundTitle: "notepad"}}
+	g, err := Look(context.Background(), nil, host, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(g.Caption, "notepad") {
+		t.Fatalf("%q", g.Caption)
+	}
+}
+
+type fakeGlanceJev struct {
+	activity string
+	private  float64
+}
+
+func (f *fakeGlanceJev) Evaluate(_ context.Context, _ any, qs map[string]jev.Question) (*jev.EvalResult, error) {
+	p := f.private
+	ans := map[string]jev.Answer{
+		"activity": {Type: "choice", Choice: f.activity, Confidence: f64(0.9)},
+		"private":  {Type: "noul", Noul: &p},
+	}
+	for id := range qs {
+		if _, ok := ans[id]; !ok {
+			ans[id] = jev.Answer{Type: "noul", Noul: f64(0)}
+		}
+	}
+	return &jev.EvalResult{Answers: ans}, nil
+}

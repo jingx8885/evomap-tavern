@@ -268,13 +268,12 @@
   }
 
   let liveWS = null;
-  const eyeVideo = { camera: null, screen: null };
+  let camVideo = null;
   let camStream = null;
-  let scrStream = null;
   let eyeTimer = null;
 
-  function sendEye(source, dataURL) {
-    const payload = JSON.stringify({ type: "eye", source: source, data: dataURL });
+  function sendEye(dataURL) {
+    const payload = JSON.stringify({ type: "eye", source: "camera", data: dataURL });
     if (liveWS && liveWS.readyState === 1) {
       liveWS.send(payload);
       return;
@@ -286,11 +285,11 @@
     }).catch(function () {});
   }
 
-  function grabFrame(video, source) {
-    if (!video || video.videoWidth < 2) return;
-    const max = source === "screen" ? 720 : 480;
-    let w = video.videoWidth;
-    let h = video.videoHeight;
+  function grabCamera() {
+    if (!camVideo || camVideo.videoWidth < 2) return;
+    const max = 480;
+    let w = camVideo.videoWidth;
+    let h = camVideo.videoHeight;
     const scale = Math.min(1, max / Math.max(w, h));
     w = Math.max(1, Math.round(w * scale));
     h = Math.max(1, Math.round(h * scale));
@@ -298,68 +297,60 @@
     if (!canvas) return;
     canvas.width = w;
     canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(video, 0, 0, w, h);
-    sendEye(source, canvas.toDataURL("image/jpeg", 0.55));
+    canvas.getContext("2d").drawImage(camVideo, 0, 0, w, h);
+    sendEye(canvas.toDataURL("image/jpeg", 0.55));
   }
 
   function ensureEyeTick() {
     if (eyeTimer) return;
     eyeTimer = setInterval(function () {
-      if (eyeVideo.camera) grabFrame(eyeVideo.camera, "camera");
-      if (eyeVideo.screen) grabFrame(eyeVideo.screen, "screen");
-      if (!eyeVideo.camera && !eyeVideo.screen) {
+      if (camVideo) grabCamera();
+      else {
         clearInterval(eyeTimer);
         eyeTimer = null;
       }
     }, 2000);
   }
 
-  async function toggleEye(source) {
-    const btn = document.getElementById(source === "camera" ? "eye-cam-btn" : "eye-scr-btn");
-    const vidId = source === "camera" ? "eye-cam" : "eye-scr";
-    if (eyeVideo[source]) {
-      const stream = source === "camera" ? camStream : scrStream;
-      if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
-      if (source === "camera") camStream = null;
-      else scrStream = null;
-      eyeVideo[source] = null;
+  async function toggleCamera() {
+    const btn = document.getElementById("eye-cam-btn");
+    if (camVideo) {
+      if (camStream) camStream.getTracks().forEach(function (t) { t.stop(); });
+      camStream = null;
+      camVideo = null;
       if (btn) btn.classList.remove("active");
-      setStatus(source + " off");
+      setStatus("camera off");
       return;
     }
     try {
-      const stream = source === "camera"
-        ? await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false })
-        : await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-      const video = document.getElementById(vidId);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480 },
+        audio: false,
+      });
+      const video = document.getElementById("eye-cam");
       video.srcObject = stream;
       await video.play();
-      eyeVideo[source] = video;
-      if (source === "camera") camStream = stream;
-      else scrStream = stream;
+      camVideo = video;
+      camStream = stream;
       const track = stream.getVideoTracks()[0];
       if (track) {
         track.addEventListener("ended", function () {
-          eyeVideo[source] = null;
-          if (source === "camera") camStream = null;
-          else scrStream = null;
+          camVideo = null;
+          camStream = null;
           if (btn) btn.classList.remove("active");
         });
       }
       if (btn) btn.classList.add("active");
       ensureEyeTick();
-      setStatus(source + " on");
+      setStatus("camera on");
     } catch (err) {
-      setStatus(source + " " + err);
+      setStatus("camera " + err);
     }
   }
 
   function bindEyes() {
     const cam = document.getElementById("eye-cam-btn");
-    const scr = document.getElementById("eye-scr-btn");
-    if (cam) cam.addEventListener("click", function () { toggleEye("camera"); });
-    if (scr) scr.addEventListener("click", function () { toggleEye("screen"); });
+    if (cam) cam.addEventListener("click", function () { toggleCamera(); });
   }
 
   function connectWS() {

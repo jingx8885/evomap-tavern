@@ -1,6 +1,6 @@
-// Package eye is her outer sight: camera and screen run in parallel,
-// Jev gates whether a change is worth a vision-model caption, and the
-// caption lands on the sense bus as something she can feel.
+// Package eye is her outer sight. Camera frames go through a VLM.
+// The screen is not a screenshot: it is computer-use observation
+// (window titles classified by Jev), same split as typesafe-computer-use.
 package eye
 
 import (
@@ -38,16 +38,16 @@ type Frame struct {
 
 // Glimpse is what she currently knows about one source.
 type Glimpse struct {
-	Source    string    `json:"source"`
-	Caption   string    `json:"caption,omitempty"`
-	At        time.Time `json:"at,omitempty"`
-	Delta     float64   `json:"delta,omitempty"`
-	Width     int       `json:"width,omitempty"`
-	Height    int       `json:"height,omitempty"`
-	Bytes     int       `json:"bytes,omitempty"`
-	Ready     bool      `json:"ready,omitempty"`
-	Private   bool      `json:"private,omitempty"`
-	Noted     bool      `json:"noted,omitempty"`
+	Source  string    `json:"source"`
+	Caption string    `json:"caption,omitempty"`
+	At      time.Time `json:"at,omitempty"`
+	Delta   float64   `json:"delta,omitempty"`
+	Width   int       `json:"width,omitempty"`
+	Height  int       `json:"height,omitempty"`
+	Bytes   int       `json:"bytes,omitempty"`
+	Ready   bool      `json:"ready,omitempty"`
+	Private bool      `json:"private,omitempty"`
+	Noted   bool      `json:"noted,omitempty"`
 }
 
 // Sight is both eyes at once.
@@ -63,11 +63,18 @@ type Options struct {
 	Screen   bool
 	Interval time.Duration
 	Cooldown time.Duration
-	Grab     func() (anyJPEG []byte, err error) // tests inject; nil = native screen
+	Observe  func(ctx context.Context) (ScreenView, error) // computer-use glance; tests inject
 	Jev      Evaluator
 	LLM      Visioner
 	LogFn    func(string)
 	OnSight  func(Sight)
+}
+
+// ScreenView is what computer-use observation reports. No JPEG.
+type ScreenView struct {
+	Caption   string
+	Signature string
+	Private   bool
 }
 
 // ParseSources reads a flag like "both", "off", "camera", "screen", "camera,screen".

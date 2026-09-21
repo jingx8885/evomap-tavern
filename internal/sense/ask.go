@@ -12,8 +12,8 @@ const (
 	AskExistence = "existence" // who/what are you
 	AskBody      = "body"      // can you feel/see yourself
 	AskCode      = "code"      // how are you made / your source
-	AskFile      = "file" // a specific file in her body
-	AskSee       = "see"  // camera / screen
+	AskFile      = "file"      // a specific file in her body
+	AskSee       = "see"       // camera / screen
 )
 
 // Ask is a parsed self-inquiry.

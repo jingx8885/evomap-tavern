@@ -62,7 +62,8 @@ dd {
   margin: 0;
   font-variant-numeric: tabular-nums;
 }
-#self {
+#self,
+#eye {
   max-width: 140px;
   text-align: right;
   overflow: hidden;

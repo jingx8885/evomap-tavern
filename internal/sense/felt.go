@@ -49,7 +49,7 @@ func feltPulse(live Live) string {
 
 func feltSee(live Live) string {
 	var s strings.Builder
-	s.WriteString("You can see. Speak from what the eyes just showed, in your own words, short. ")
+	s.WriteString("You can see. Camera is pixels; the screen is computer-use (window titles), not a screenshot. Speak from those notes, short. ")
 	if live.Camera == "" && live.Screen == "" {
 		s.WriteString("The eyes are on but nothing has resolved yet — say you are looking, not that you are blind. ")
 		return s.String()
