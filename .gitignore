@@ -1,0 +1,5 @@
+/runs/
+/*.wav
+/tavernbot
+*.log
+.DS_Store
