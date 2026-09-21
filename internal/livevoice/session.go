@@ -445,6 +445,13 @@ func (s *Session) AppendContext(channel, text string) error {
 	})
 }
 
+// Nudge injects a proactive cue through the commentary channel:
+// the model sees it and may respond aloud, incorporating it.
+// Use it for planner-driven conversation moves.
+func (s *Session) Nudge(cue string) error {
+	return s.AppendContext("commentary", cue)
+}
+
 // Respond asks the model to produce a response turn.
 func (s *Session) Respond() error {
 	return s.sendJSON(map[string]any{"type": "response.create"})

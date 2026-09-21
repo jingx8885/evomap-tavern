@@ -113,7 +113,11 @@
 ## 已知边界
 
 - `delegation.type` 只支持 `client`；`responses` 委派不可用。
-- `session.context.append` channel 只接受 speakable / commentary / developer；developer 静默注入不念出，是 steering 通道；`response.create` 需要 Responses delegation，不可用。
+- `session.context.append` channel 只接受三种：
+  - `speakable`：逐字念出（TTS），用于问候语和 `/say`
+  - `developer`：静默注入，模型参考但不念、不主动回复——Jev 判断后的 steering
+  - `commentary`：注入后模型会主动开口回应——planner 的长期引导走这里
+- `response.create` 需要 Responses delegation，不可用；turn.done 带 role 可区分 user/assistant。
 - `session.output_audio.delta` 是连续时间线，不是只在说话时才发。
 - 麦克风采集默认关闭（`-tags tavern_mic` 开启）。
 - 安全判断是启发式：safety noul 超过阈值就进 comfort 模式，但不会替代真人介入。

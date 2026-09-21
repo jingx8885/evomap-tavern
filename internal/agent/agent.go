@@ -135,7 +135,25 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 	} else {
 		opt.log("[steer] mode=%s", mode)
 	}
+	before := pl.State().LastRefreshed
 	pl.Tick(ctx, mem, false)
+	go func() {
+		// wait briefly for async refine; if it produced a new
+		// note, nudge the conversation through commentary
+		deadline := time.Now().Add(50 * time.Second)
+		for time.Now().Before(deadline) {
+			st := pl.State()
+			if st.Source == "llm" && st.LastRefreshed.After(before) {
+				if err := sess.Nudge(st.Note); err != nil {
+					opt.log("[nudge] failed: %v", err)
+				} else {
+					opt.log("[nudge] %s", st.Note)
+				}
+				return
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+	}()
 }
 
 // handleCommand processes a slash command; returns true to quit.

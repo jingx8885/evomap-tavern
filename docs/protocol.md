@@ -15,3 +15,13 @@
 - `session.update` 改 instructions；`session.close` 结束。
 - `session.usage.updated` 累计 `audio_duration_ms`。
 - 边界：纯 WS 只能收；不做音频重编码；`responses` 委派不可用。
+
+## context.append channels（实测）
+
+| channel | 行为 | 用途 |
+|---|---|---|
+| speakable | 逐字念出（TTS） | 问候语、/say |
+| developer | 静默注入，不念、不主动回复 | Jev steering note |
+| commentary | 注入后模型会主动开口回应 | planner 长期引导 nudge |
+
+其他 channel（context/ephemeral/instructions/memory）上游报 Invalid value。
