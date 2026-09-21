@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -143,6 +144,7 @@ func (h *Hub) Handler(dir string) http.Handler {
 		json.NewEncoder(w).Encode(h.Last())
 	})
 	mux.HandleFunc("/api/sense", h.serveSense)
+	mux.HandleFunc("/api/eye", h.serveEye)
 	mux.HandleFunc("/drive", h.serveDrive)
 	return mux
 }
@@ -155,6 +157,37 @@ func (h *Hub) serveSense(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(fn())
+}
+
+func (h *Hub) serveEye(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var in struct {
+		Source string `json:"source"`
+		Data   string `json:"data"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !h.dispatchEye(in.Source, in.Data) {
+		http.Error(w, "eye handler missing", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+func (h *Hub) dispatchEye(source, dataURL string) bool {
+	fn, _ := h.eyeFn.Load().(func(string, string))
+	if fn == nil || strings.TrimSpace(dataURL) == "" {
+		return fn != nil && strings.TrimSpace(dataURL) != ""
+	}
+	fn(source, dataURL)
+	return true
 }
 
 func (h *Hub) serveDrive(w http.ResponseWriter, r *http.Request) {
@@ -205,6 +238,7 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 	h.clients[conn] = cli
 	last := h.last
 	h.mu.Unlock()
+	go h.readEye(conn)
 	go func() {
 		defer func() {
 			h.mu.Lock()
@@ -253,6 +287,28 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
+}
+
+func (h *Hub) readEye(conn *websocket.Conn) {
+	conn.SetReadLimit(1 << 20)
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		var in struct {
+			Type   string `json:"type"`
+			Source string `json:"source"`
+			Data   string `json:"data"`
+		}
+		if json.Unmarshal(data, &in) != nil {
+			continue
+		}
+		if in.Type != "eye" {
+			continue
+		}
+		h.dispatchEye(in.Source, in.Data)
+	}
 }
 
 // Options for Listen.
