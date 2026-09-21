@@ -135,6 +135,21 @@ func TestHubDriveAndWS(t *testing.T) {
 	if held < 2 {
 		t.Fatalf("held lipsync frames %d, want keepalive while mouth is open", held)
 	}
+
+	var gotSrc string
+	h.SetEye(func(source, dataURL string) { gotSrc = source })
+	eyeBody := `{"source":"camera","data":"data:image/jpeg;base64,/9j/4AAQ"}`
+	eyeResp, err := http.Post(srv.URL+"/api/eye", "application/json", strings.NewReader(eyeBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eyeResp.Body.Close()
+	if eyeResp.StatusCode != 200 {
+		t.Fatalf("eye status %d", eyeResp.StatusCode)
+	}
+	if gotSrc != "camera" {
+		t.Fatalf("eye source %q", gotSrc)
+	}
 }
 
 func TestHubMouthDecays(t *testing.T) {

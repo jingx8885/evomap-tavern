@@ -79,6 +79,13 @@ dd {
   flex-wrap: wrap;
   gap: 6px;
 }
+#eyes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+#eyes button,
 #modes button {
   background: transparent;
   color: var(--ink);
@@ -87,6 +94,8 @@ dd {
   cursor: pointer;
   font: inherit;
 }
+#eyes button:hover,
+#eyes button.active,
 #modes button:hover,
 #modes button.active {
   border-color: var(--accent);
