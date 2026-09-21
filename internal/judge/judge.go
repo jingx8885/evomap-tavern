@@ -104,10 +104,11 @@ func questions(p *persona.Persona, withPersonaFit bool) map[string]jev.Question 
 }
 
 func scoreNorm(a jev.Answer) float64 {
-	if a.Score == nil || len(a.Legend) == 0 {
+	n := a.LegendLen()
+	if a.Score == nil || n < 2 {
 		return 0
 	}
-	v := *a.Score / float64(len(a.Legend)-1)
+	v := *a.Score / float64(n-1)
 	if v < 0 {
 		return 0
 	}

@@ -62,7 +62,7 @@ type Answer struct {
 	Choice        string             `json:"choice,omitempty"`
 	Score         *float64           `json:"score,omitempty"`
 	Probabilities map[string]float64 `json:"probabilities,omitempty"`
-	Legend        []string           `json:"legend,omitempty"`
+	Legend        map[string]string  `json:"legend,omitempty"`
 	Confidence    *float64           `json:"confidence,omitempty"`
 }
 
@@ -98,6 +98,12 @@ func NewClient(baseURL, apiKey, model string) *Client {
 type httpError struct {
 	Status int
 	Body   string
+}
+
+// LegendLen returns the number of legend entries regardless of
+// whether the gateway encoded it as an array or an object.
+func (a Answer) LegendLen() int {
+	return len(a.Legend)
 }
 
 func (e *httpError) Error() string {

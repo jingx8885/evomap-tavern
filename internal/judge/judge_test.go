@@ -15,7 +15,7 @@ import (
 func f(v float64) *float64 { return &v }
 
 func TestScoreNorm(t *testing.T) {
-	a := jev.Answer{Score: f(4), Legend: []string{"a", "b", "c", "d", "e"}}
+	a := jev.Answer{Score: f(4), Legend: map[string]string{"0": "a", "1": "b", "2": "c", "3": "d", "4": "e"}}
 	if got := scoreNorm(a); got != 1.0 {
 		t.Fatalf("got %v", got)
 	}
@@ -27,10 +27,10 @@ func TestScoreNorm(t *testing.T) {
 
 func TestParse(t *testing.T) {
 	ans := map[string]jev.Answer{
-		"valence":    {Score: f(3.5), Legend: []string{"1", "2", "3", "4", "5"}},
-		"arousal":    {Score: f(1), Legend: []string{"1", "2", "3", "4", "5"}},
+		"valence":    {Score: f(3.5), Legend: map[string]string{"0": "1", "1": "2", "2": "3", "3": "4", "4": "5"}},
+		"arousal":    {Score: f(1), Legend: map[string]string{"0": "1", "1": "2", "2": "3", "3": "4", "4": "5"}},
 		"emotion":    {Choice: "sadness", Probabilities: map[string]float64{"sadness": 0.8}},
-		"engagement": {Score: f(2), Legend: []string{"1", "2", "3", "4", "5"}},
+		"engagement": {Score: f(2), Legend: map[string]string{"0": "1", "1": "2", "2": "3", "3": "4", "4": "5"}},
 		"safety":     {Noul: f(0.7)},
 	}
 	j := Parse("i feel bad", ans)
@@ -77,10 +77,10 @@ func TestJudgeTurnAgainstFakeServer(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"model": "jev-latest",
 			"answers": map[string]any{
-				"valence":     map[string]any{"type": "score", "score": 4, "legend": []string{"1", "2", "3", "4", "5"}},
-				"arousal":     map[string]any{"type": "score", "score": 2, "legend": []string{"1", "2", "3", "4", "5"}},
+				"valence":     map[string]any{"type": "score", "score": 4, "legend": map[string]any{"0": "a", "1": "b", "2": "c", "3": "d", "4": "e"}},
+				"arousal":     map[string]any{"type": "score", "score": 2, "legend": map[string]any{"0": "a", "1": "b", "2": "c", "3": "d", "4": "e"}},
 				"emotion":     map[string]any{"type": "choice", "choice": "joy", "probabilities": map[string]float64{"joy": 0.9}},
-				"engagement":  map[string]any{"type": "score", "score": 4, "legend": []string{"1", "2", "3", "4", "5"}},
+				"engagement":  map[string]any{"type": "score", "score": 4, "legend": map[string]any{"0": "a", "1": "b", "2": "c", "3": "d", "4": "e"}},
 				"safety":      map[string]any{"type": "noul", "noul": 0.01},
 				"persona_fit": map[string]any{"type": "noul", "noul": 0.9},
 			},
