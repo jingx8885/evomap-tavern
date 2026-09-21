@@ -58,13 +58,18 @@
     # 离线判断一段文本（不走语音）
     ./tavernbot judge --persona personas/tavern_keeper.yaml --text "今天真的累坏了"
 
-    # 启动双工会话
+    # 启动双工会话（同时打开 Haru Live2D 查看器，Jev 每轮推表情）
     ./tavernbot run --persona personas/tavern_keeper.yaml -v
+
+    # 只看 Live2D：循环 Jev steering mode，并合成口型
+    ./tavernbot live2d --demo --lipsync
 
 凭证：`OPENAI_API_KEY` > `LOVBROWSER_API_KEY` > `~/.config/akasha/credentials.env`。
 网关默认 `https://newapi.1234bot.com/v1`，可用 `NEW_API_BASE_URL` 或 `--base-url` 覆盖。
 
 `run` 里的键盘指令：`/say <文本>`（让人设念出来）、`/steer <文本>`（改 session 指令）、`/goal <文本>`（手动设长期目标）、`/status`、`/quit`。
+
+默认在 `http://127.0.0.1:8787` 打开 Haru 查看器。`--live2d=off` 关闭；`judge --live2d http://127.0.0.1:8787` 可以把单次 Jev 判断推到已经开着的查看器。
 
 ## 真实麦克风
 
@@ -72,7 +77,7 @@
 
     go build -tags tavern_mic ./cmd/tavernbot   # 需要 cgo / miniaudio
 
-下行音频通过 `afplay`（macOS）/`aplay`（Linux）分块播放；找不到播放器时只落盘 WAV。
+下行音频：Windows 走 winmm 流式播放，macOS `afplay`，Linux `aplay`/`ffplay`。Live2D 页面只跟口型和表情，避免和第二路扬声器叠成回声。
 
 ## 协议事实（已验证）
 
@@ -91,8 +96,15 @@
 3. `judge.DecideMode` 选模式（safety > comfort/de_escalate/celebrate > re_engage > goal_push > continue）。
 4. `steering.Build` 组合成 guidance，`session.context.append` + `channel:"developer"` 注入语音会话。
 5. `planner.Tick` 每 N 轮问 Jev 是否到自然停顿且目标未尽；过了就异步让 LLM 刷新 plan note。
+6. 同一帧 `avatar.Drive` 把 **steering mode**（不是用户脸）映射成 Haru 表情/动作，经 WebSocket 推到查看器。
 
 阈值在 persona YAML 的 `judge.*` 和 `planner.*` 里改。
+
+## Live2D
+
+查看器在 `web/live2d`，默认模型是官方样本 **Haru**（来自 [CubismWebSamples](https://github.com/Live2D/CubismWebSamples)），和 vale 这类偏亮少女声更搭。角色按 Jev 的 persona 反应驱动：客人难过 → `comfort` → 软表情；高兴 → `celebrate` → 笑眼 + TapBody。下行 PCM 的能量映射到 `ParamMouthOpenY` 做口型，情感参数在 Idle 动作之后每帧叠上去。`live2d --lipsync` 可在没语音时看张嘴。
+
+Cubism Core 从 Live2D CDN 加载，首次需要能上网。Haru / Mao 素材受 [Live2D 免费素材协议](https://www.live2d.jp/en/terms/live2d-free-material-license-agreement/) 约束，不在 Apache-2.0 范围内。
 
 ## 目录
 
@@ -109,6 +121,8 @@
       livevoice/            WebRTC + WS 双工会话
       agent/                编排 loop
     personas/               人设 YAML
+    web/live2d/             Haru 查看器 + 官方样本模型
+    internal/avatar/        Jev → 表情/动作映射 + WS hub
 
 ## 已知边界
 

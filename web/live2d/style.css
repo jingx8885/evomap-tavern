@@ -1,0 +1,117 @@
+:root {
+  --bg: #14110e;
+  --panel: #1e1a16;
+  --ink: #f3eadc;
+  --muted: #a89880;
+  --line: #3a322a;
+  --accent: #d4a574;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.4 "Segoe UI", "PingFang SC", sans-serif;
+  overflow: hidden;
+}
+#stage {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+#hud {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  width: 260px;
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--ink);
+}
+#hud header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+#conn {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+#conn.ok { color: var(--accent); }
+#conn.bad { color: #c47a6a; }
+#hud dl {
+  margin: 0;
+}
+#hud dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--line);
+}
+dt {
+  color: var(--muted);
+  font-weight: 400;
+}
+dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+#hint {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 12px 0 8px;
+}
+#modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+#modes button {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  padding: 4px 8px;
+  cursor: pointer;
+  font: inherit;
+}
+#modes button:hover,
+#modes button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+#unmute {
+  margin-top: 10px;
+  width: 100%;
+  background: var(--accent);
+  color: #14110e;
+  border: 0;
+  padding: 8px 10px;
+  cursor: pointer;
+  font: inherit;
+}
+#unmute.hidden { display: none; }
+#mouth-bar {
+  height: 6px;
+  background: var(--line);
+  margin: 8px 0 0;
+}
+#mouth-bar > span {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+}
+#status {
+  position: fixed;
+  right: 16px;
+  bottom: 12px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}

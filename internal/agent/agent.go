@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jingx8885/lov-evo/internal/audio"
+	"github.com/jingx8885/lov-evo/internal/avatar"
 	"github.com/jingx8885/lov-evo/internal/jev"
 	"github.com/jingx8885/lov-evo/internal/judge"
 	"github.com/jingx8885/lov-evo/internal/livevoice"
@@ -34,6 +36,11 @@ type Options struct {
 	Greeting     bool
 	Verbose      bool
 	LogFn        func(string)
+	Live2DAddr   string
+	Live2DDir    string
+	OpenViewer   bool
+	Say          string
+	avatarHub    *avatar.Hub
 }
 
 // Run starts a live voice session and processes turns until ctx is done.
@@ -48,6 +55,23 @@ func Run(ctx context.Context, opt Options) error {
 	pl := planner.New(p, jevClient, llmClient, opt.PlannerModel)
 	pl.LogFn = func(s string) { opt.log("%s", "[planner] "+s) }
 
+	if addr := strings.TrimSpace(opt.Live2DAddr); addr != "" && addr != "off" {
+		hub, _, err := avatar.Listen(ctx, avatar.ListenOptions{
+			Addr:  addr,
+			Dir:   opt.Live2DDir,
+			Open:  opt.OpenViewer,
+			LogFn: func(s string) { opt.log("%s", s) },
+		})
+		if err != nil {
+			opt.log("live2d disabled: %v", err)
+		} else {
+			opt.avatarHub = hub
+			hub.Publish(avatar.Drive("continue", &judge.Judgment{
+				Emotion: "neutral", Engagement: 0.7,
+			}, memory.Affect{Valence: 0.55, Arousal: 0.4, Emotion: "neutral"}))
+		}
+	}
+
 	sess, err := livevoice.Connect(ctx, opt.BaseURL, opt.APIKey,
 		p.BaseInstructions(), p.Voice)
 	if err != nil {
@@ -55,6 +79,13 @@ func Run(ctx context.Context, opt Options) error {
 	}
 	sess.Verbose = opt.Verbose
 	defer sess.Close()
+	if opt.avatarHub != nil {
+		sess.OnPCM(func(pcm []byte) {
+			// Mouth only: local winmm already plays this PCM. Sending it
+			// to the viewer made the browser play a second copy (echo).
+			opt.avatarHub.Mouth(audio.MouthOpen(pcm))
+		})
+	}
 
 	wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := sess.WaitStarted(wctx); err != nil {
@@ -69,12 +100,21 @@ func Run(ctx context.Context, opt Options) error {
 			opt.log("greeting failed: %v", err)
 		}
 	}
+	if s := strings.TrimSpace(opt.Say); s != "" {
+		if err := sess.Speak(s); err != nil {
+			opt.log("say failed: %v", err)
+		} else {
+			opt.log("say: %s", s)
+		}
+	}
 
 	cmds := make(chan string, 16)
 	go readStdin(ctx, cmds)
 	opt.log("commands: /say <text> (speak) /steer <text> (reinstruct) " +
 		"/goal <text> (plan) /status /quit")
 
+	var lastTurnKey string
+	var lastTurnAt time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -86,6 +126,11 @@ func Run(ctx context.Context, opt Options) error {
 			switch ev.Kind {
 			case livevoice.EventTurnDone:
 				assistant, _ := ev.Usage["assistant"].(string)
+				key := ev.Text + "\x00" + assistant
+				if key == lastTurnKey && time.Since(lastTurnAt) < time.Second {
+					continue
+				}
+				lastTurnKey, lastTurnAt = key, time.Now()
 				if assistant != "" {
 					mem.Add(memory.Turn{Speaker: "assistant", Text: assistant})
 					opt.log("[assistant] %s", clip(assistant, 120))
@@ -117,6 +162,12 @@ func Run(ctx context.Context, opt Options) error {
 func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 	jc *jev.Client, mem *memory.Memory, pl *planner.Planner,
 	sess *livevoice.Session, userText string) {
+	// Greeting / model self-talk has no user text. Judging those as
+	// "low engagement" steers re_engage and commentary-nudges, which
+	// makes the duplex model say the same line again.
+	if strings.TrimSpace(userText) == "" {
+		return
+	}
 	jd, err := judge.JudgeTurn(ctx, jc, p, mem, userText)
 	if err != nil {
 		opt.log("[judge] skipped: %v", err)
@@ -129,6 +180,9 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 		jd.Emotion, jd.Valence, jd.Arousal, jd.Engagement, jd.SafetyP, jd.Confidence)
 
 	mode := judge.DecideMode(jd, affect, p.Judge.SafetyThresh, pl.Current())
+	if opt.avatarHub != nil {
+		opt.avatarHub.Publish(avatar.Drive(mode, jd, affect))
+	}
 	note := steering.Build(p, mode, jd, affect, pl.Current())
 	if err := sess.Steer(note); err != nil {
 		opt.log("[steer] failed: %v", err)
@@ -138,17 +192,17 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 	before := pl.State().LastRefreshed
 	pl.Tick(ctx, mem, false)
 	go func() {
-		// wait briefly for async refine; if it produced a new
-		// note, nudge the conversation through commentary
 		deadline := time.Now().Add(50 * time.Second)
 		for time.Now().Before(deadline) {
-			st := pl.State()
-			if st.Source == "llm" && st.LastRefreshed.After(before) {
-				if err := sess.Nudge(st.Note); err != nil {
+			if note, ok := pl.ConsumeNudge(before); ok {
+				if err := sess.Nudge(note); err != nil {
 					opt.log("[nudge] failed: %v", err)
 				} else {
-					opt.log("[nudge] %s", st.Note)
+					opt.log("[nudge] %s", note)
 				}
+				return
+			}
+			if !pl.Refining() {
 				return
 			}
 			time.Sleep(300 * time.Millisecond)

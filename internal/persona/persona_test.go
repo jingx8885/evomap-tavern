@@ -3,6 +3,7 @@ package persona
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -19,5 +20,8 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if p.BaseInstructions() == "" {
 		t.Fatal("instructions empty")
+	}
+	if !strings.Contains(p.BaseInstructions(), "Wait for the user") {
+		t.Fatal("must wait for the user instead of self-introducing")
 	}
 }

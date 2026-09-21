@@ -52,6 +52,7 @@ func OpenMic(_ int) (<-chan []byte, func(), error) {
 		ctx.Free()
 		return nil, func() {}, fmt.Errorf("malgo start: %w", err)
 	}
+	setMicFormat("malgo 16kHz mono")
 	stop := func() {
 		once.Do(func() {
 			device.Stop()

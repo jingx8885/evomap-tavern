@@ -27,11 +27,12 @@ func modeDirective(mode string) string {
 	case "celebrate":
 		return "Match their energy; be enthusiastic and share the moment."
 	case "re_engage":
-		return "Ask a light open question or offer a choice to invite them back in."
+		return "Continue from the last topic with one specific, light follow-up. " +
+			"Do not greet, introduce yourself, or ask a generic what-should-we-talk-about."
 	case "goal_push":
 		return "Naturally steer the conversation toward the current goal below."
 	default:
-		return "Continue naturally."
+		return "Continue naturally from what they just said. Do not greet or introduce yourself."
 	}
 }
 
@@ -52,6 +53,7 @@ func Build(p *persona.Persona, mode string, j *judge.Judgment,
 	if planNote != "" {
 		fmt.Fprintf(&b, "Goal guidance: %s ", planNote)
 	}
+	b.WriteString("Follow Mode for how to talk. Do not greet or re-introduce yourself. ")
 	b.WriteString("Reply in the user's language; keep it short enough for voice.")
 	return b.String()
 }

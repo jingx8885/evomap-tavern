@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>lov-evo · Haru</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <aside id="hud">
+    <header>
+      <strong>lov-evo</strong>
+      <span id="conn">connecting</span>
+    </header>
+    <dl>
+      <div><dt>mode</dt><dd id="mode">—</dd></div>
+      <div><dt>emotion</dt><dd id="emotion">—</dd></div>
+      <div><dt>expression</dt><dd id="expression">—</dd></div>
+      <div><dt>valence</dt><dd id="valence">—</dd></div>
+      <div><dt>arousal</dt><dd id="arousal">—</dd></div>
+      <div><dt>engage</dt><dd id="engagement">—</dd></div>
+      <div><dt>mouth</dt><dd id="mouth">—</dd></div>
+    </dl>
+    <div id="mouth-bar"><span></span></div>
+    <p id="hint">语音从本机扬声器播出。说话时张嘴；Jev 每轮推表情。也可点下面的模式试情感。</p>
+    <div id="modes"></div>
+    <button type="button" id="unmute" class="hidden">开声音</button>
+  </aside>
+  <p id="status">loading Cubism runtime…</p>
+  <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+  <script src="/app.js?v=haru"></script>
+</body>
+</html>

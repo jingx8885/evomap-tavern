@@ -79,6 +79,23 @@ func TestRefineAppliesLLM(t *testing.T) {
 	}
 }
 
+func TestConsumeNudgeOnce(t *testing.T) {
+	pl := newPlanner(&fakeJev{}, &fakeLLM{})
+	before := time.Now().Add(-time.Second)
+	pl.mu.Lock()
+	pl.plan.Note = "ask about the map"
+	pl.plan.Source = "llm"
+	pl.plan.LastRefreshed = time.Now()
+	pl.mu.Unlock()
+	note, ok := pl.ConsumeNudge(before)
+	if !ok || note != "ask about the map" {
+		t.Fatalf("first consume: note=%q ok=%v", note, ok)
+	}
+	if note, ok := pl.ConsumeNudge(before); ok {
+		t.Fatalf("second consume must be empty, got %q", note)
+	}
+}
+
 func TestFallbackOnLLMError(t *testing.T) {
 	fj := &fakeJev{pause: 0.9, remaining: 0.9}
 	fl := &fakeLLM{err: fmt.Errorf("boom")}

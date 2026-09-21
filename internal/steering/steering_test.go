@@ -19,4 +19,7 @@ func TestBuild(t *testing.T) {
 			t.Fatalf("missing %q in %q", want, got)
 		}
 	}
+	if !strings.Contains(got, "Do not greet") {
+		t.Fatalf("steering must forbid re-intro: %q", got)
+	}
 }

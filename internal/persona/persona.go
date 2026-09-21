@@ -75,6 +75,7 @@ func (p *Persona) BaseInstructions() string {
 	if len(p.Taboos) > 0 {
 		fmt.Fprintf(&b, "Never: %s. ", strings.Join(p.Taboos, "; "))
 	}
+	b.WriteString("Wait for the user to speak first. Do not greet, introduce yourself, or repeat your name unless asked. Follow the latest steering mode for how to talk. ")
 	b.WriteString("Respond conversationally in the user's language; keep replies short enough for voice.")
 	return b.String()
 }

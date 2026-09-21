@@ -48,6 +48,7 @@ type Planner struct {
 	turns      int
 	refining   bool
 	nextGoalIx int
+	nudgedAt   time.Time
 }
 
 // New builds a planner; initial guidance comes from persona goals.
@@ -89,6 +90,21 @@ func (pl *Planner) SetNote(note string) {
 	defer pl.mu.Unlock()
 	pl.plan.Note = note
 	pl.plan.Source = "manual"
+}
+
+// ConsumeNudge returns a newly refined LLM note once. Duplicate waiters
+// (and duplicate turn.done events) must not commentary-nudge twice.
+func (pl *Planner) ConsumeNudge(since time.Time) (string, bool) {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	if pl.plan.Source != "llm" || !pl.plan.LastRefreshed.After(since) {
+		return "", false
+	}
+	if !pl.nudgedAt.Before(pl.plan.LastRefreshed) {
+		return "", false
+	}
+	pl.nudgedAt = pl.plan.LastRefreshed
+	return pl.plan.Note, true
 }
 
 func gateQuestions() map[string]jev.Question {

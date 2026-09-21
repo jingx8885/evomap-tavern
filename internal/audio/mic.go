@@ -1,4 +1,4 @@
-//go:build !tavern_mic
+//go:build !tavern_mic && !windows
 
 package audio
 
@@ -7,5 +7,6 @@ package audio
 // (the gateway only plays speakable text while uplink RTP is active).
 // Real capture is compiled with -tags tavern_mic.
 func OpenMic(sampleRate int) (<-chan []byte, func(), error) {
+	setMicFormat("disabled")
 	return nil, func() {}, ErrNoMicDevice
 }

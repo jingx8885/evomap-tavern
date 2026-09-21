@@ -80,6 +80,10 @@ type Session struct {
 	pcmBytes      atomic.Int64
 	pcmMu         sync.Mutex
 	pcmAll        []byte
+	onPCMMu       sync.Mutex
+	onPCM         func([]byte)
+	echoN         atomic.Int64
+	duckMicUntil  atomic.Int64
 
 	Verbose bool
 }
@@ -109,7 +113,11 @@ func Connect(ctx context.Context, baseURL, apiKey, instructions, voice string) (
 	s.pc = pc
 
 	track, err := webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypePCMU},
+		webrtc.RTPCodecCapability{
+			MimeType:  webrtc.MimeTypePCMU,
+			ClockRate: 8000,
+			Channels:  1,
+		},
 		"audio", "tavernbot")
 	if err != nil {
 		pc.Close()
@@ -130,6 +138,12 @@ func Connect(ctx context.Context, baseURL, apiKey, instructions, voice string) (
 			}
 		}
 	}()
+	pc.OnICEConnectionStateChange(func(st webrtc.ICEConnectionState) {
+		fmt.Printf("[livevoice] ice %s\n", st)
+	})
+	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
+		fmt.Printf("[livevoice] pc %s\n", st)
+	})
 	pc.OnTrack(func(tr *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		go func() {
 			buf := make([]byte, 1500)
@@ -140,11 +154,12 @@ func Connect(ctx context.Context, baseURL, apiKey, instructions, voice string) (
 			}
 		}()
 	})
-	dc, err := pc.CreateDataChannel("oai-events", nil)
-	if err == nil {
-		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			s.handleEvent(msg.Data)
-		})
+	// Keep the OpenAI-style data channel in the SDP so the gateway
+	// is happy, but do not parse its messages. Events already arrive
+	// on GET /live/{call_id}; handling both replays every PCM chunk
+	// and double-fires turn.done.
+	if _, err := pc.CreateDataChannel("oai-events", nil); err != nil {
+		s.logf("data channel: %v", err)
 	}
 
 	offer, err := pc.CreateOffer(nil)
@@ -234,18 +249,39 @@ func (s *Session) postCall(sdp, instructions string) (callID, answer string, err
 	return callID, string(raw), nil
 }
 
+// duckMouthMin is MouthOpen of real speech, not comfort-noise padding on
+// the continuous downlink timeline. A low threshold latches ducking and
+// the gateway only ever hears silence.
+const duckMouthMin = 0.18
+
 // uplink streams PCMU frames at 20ms cadence: mic frames when available,
 // silence otherwise (the gateway needs active RTP to play speakable text).
 func (s *Session) uplink(ctx context.Context) {
 	micFrames, micStop, err := audio.OpenMic(audio.PCMUUplinkRate)
 	if err != nil {
 		s.logf("uplink: %v", err)
+	} else {
+		s.logf("uplink: microphone %s", audio.MicFormat())
 	}
 	s.micStop = micStop
+	silenceFrame := bytes.Repeat([]byte{audio.SilenceByte}, audio.PCMUFrameBytes)
+	write := func(frame []byte) {
+		if len(frame) == 0 {
+			frame = silenceFrame
+		}
+		_ = s.track.WriteSample(media.Sample{
+			Data:     frame,
+			Duration: audio.PCMUFrameDur,
+		})
+	}
+	if micFrames != nil {
+		s.uplinkMic(ctx, micFrames, write, silenceFrame)
+		return
+	}
+
 	stop := make(chan struct{})
 	defer close(stop)
 	silence := audio.SilenceFrames(stop)
-
 	ticker := time.NewTicker(audio.PCMUFrameDur)
 	defer ticker.Stop()
 	for {
@@ -254,27 +290,64 @@ func (s *Session) uplink(ctx context.Context) {
 			return
 		case <-ticker.C:
 			var frame []byte
-			if micFrames != nil {
-				select {
-				case f, ok := <-micFrames:
-					if ok {
-						frame = f
-					}
-				default:
-				}
+			select {
+			case f := <-silence:
+				frame = f
+			default:
+				frame = silenceFrame
 			}
-			if frame == nil {
-				select {
-				case f := <-silence:
-					frame = f
-				default:
-					frame = bytes.Repeat([]byte{audio.SilenceByte}, audio.PCMUFrameBytes)
-				}
+			write(frame)
+		}
+	}
+}
+
+// uplinkMic paces RTP from capture itself. The old ticker + non-blocking
+// read stuffed silence whenever a mic frame was 1ms late, which shreds ASR.
+func (s *Session) uplinkMic(ctx context.Context, micFrames <-chan []byte, write func([]byte), silence []byte) {
+	var n, ducked int
+	var maxRMS float64
+	lastLog := time.Now()
+	stall := time.NewTimer(80 * time.Millisecond)
+	defer stall.Stop()
+	resetStall := func() {
+		if !stall.Stop() {
+			select {
+			case <-stall.C:
+			default:
 			}
-			_ = s.track.WriteSample(media.Sample{
-				Data:     frame,
-				Duration: audio.PCMUFrameDur,
-			})
+		}
+		stall.Reset(80 * time.Millisecond)
+	}
+	for {
+		resetStall()
+		select {
+		case <-ctx.Done():
+			return
+		case f, ok := <-micFrames:
+			if !ok {
+				return
+			}
+			if r := audio.UlawRMS(f); r > maxRMS {
+				maxRMS = r
+			}
+			frame := f
+			if time.Now().UnixNano() < s.duckMicUntil.Load() {
+				frame = silence
+				ducked++
+			}
+			n++
+			write(frame)
+			if s.Verbose && time.Since(lastLog) >= 2*time.Second {
+				s.logf("uplink: frames=%d max_rms=%.4f ducked=%d echo=%d format=%s",
+					n, maxRMS, ducked, s.echoN.Swap(0), audio.MicFormat())
+				if maxRMS < 0.002 {
+					s.logf("uplink: mic looks silent; speech will not be recognized")
+				}
+				n, ducked, maxRMS = 0, 0, 0
+				lastLog = time.Now()
+			}
+		case <-stall.C:
+			write(silence)
 		}
 	}
 }
@@ -298,16 +371,21 @@ func (s *Session) handleEvent(data []byte) {
 		return
 	}
 	etype, _ := ev["type"].(string)
-	if s.Verbose && etype != "session.output_audio.delta" {
-		s.logf("event %s", etype)
+	if s.Verbose && etype != "session.output_audio.delta" && etype != "session.input_audio.append" {
+		if tx := transcriptText(ev); tx != "" {
+			s.logf("event %s text=%q", etype, clipRunes(tx, 80))
+		} else {
+			s.logf("event %s", etype)
+		}
 	}
-	switch etype {
-	case "session.started":
-		s.startedOne.Do(func() { close(s.started) })
-		s.emit(Event{Kind: EventStarted})
-	case "session.input_audio.append":
+	switch {
+	case etype == "session.started":
+		s.markStarted()
+	case etype == "session.input_audio.append":
+		s.markStarted()
+		s.echoN.Add(1)
 		s.emit(Event{Kind: EventInputEcho})
-	case "session.output_audio.delta":
+	case etype == "session.output_audio.delta":
 		chunk := strField(ev, "delta", "audio", "data")
 		if chunk == "" {
 			return
@@ -320,52 +398,74 @@ func (s *Session) handleEvent(data []byte) {
 		s.pcmMu.Lock()
 		s.pcmAll = append(s.pcmAll, pcm...)
 		s.pcmMu.Unlock()
-		if s.player != nil {
+		mouth := audio.MouthOpen(pcm)
+		if mouth > duckMouthMin {
+			s.duckMicUntil.Store(time.Now().Add(400 * time.Millisecond).UnixNano())
+		}
+		// Comfort-noise padding is a continuous timeline; playing it
+		// leaks into the mic, VAD never ends, and the model never replies.
+		if s.player != nil && mouth > 0 {
 			s.player.WritePCM(pcm)
 		}
-	case "turn.created":
-		s.turnUser.Reset()
-		s.turnAssistant.Reset()
-		s.interim.Reset()
-	case "output_transcript.added", "output_transcript.delta", "turn.delta":
+		s.onPCMMu.Lock()
+		fn := s.onPCM
+		s.onPCMMu.Unlock()
+		if fn != nil {
+			fn(pcm)
+		}
+	case etype == "turn.created":
+		// First transcript chunks often arrive *before* turn.created.
+		// Resetting here dropped the opening words ("欢迎来到").
+	case isTranscriptEvent(etype):
 		text := transcriptText(ev)
 		if text == "" {
 			return
 		}
-		speaker := detectSpeaker(ev)
-		// these events are cumulative snapshots of the
-		// current turn's text, not deltas - replace, don't append
+		speaker := detectSpeaker(etype, ev)
+		dst := &s.turnAssistant
 		if speaker == "user" {
-			s.turnUser.Reset()
-			s.turnUser.WriteString(text)
-		} else {
-			s.turnAssistant.Reset()
-			s.turnAssistant.WriteString(text)
+			dst = &s.turnUser
 		}
-		s.interim.Reset()
-		s.interim.WriteString(text)
-		s.emit(Event{Kind: EventTranscript, Speaker: speaker, Text: text})
-	case "turn.done", "turn.completed", "response.done":
-		role := ""
-		if tt, ok := ev["turn"].(map[string]any); ok {
-			role, _ = tt["role"].(string)
+		applyTranscript(dst, text)
+		if speaker != "user" {
+			applyTranscript(&s.interim, text)
+			s.duckMicUntil.Store(time.Now().Add(400 * time.Millisecond).UnixNano())
 		}
-		s.finishTurn(role)
-	case "session.usage.updated":
+		s.emit(Event{Kind: EventTranscript, Speaker: speaker, Text: dst.String()})
+	case etype == "turn.done" || etype == "turn.completed" || etype == "response.done":
+		s.finishTurn(eventRole(ev), transcriptText(ev))
+	case etype == "session.usage.updated":
+		s.markStarted()
 		usage, _ := ev["usage"].(map[string]any)
 		s.emit(Event{Kind: EventUsage, Usage: usage})
-	case "error":
+	case etype == "error":
 		msg, _ := ev["error"].(map[string]any)
 		s.emit(Event{Kind: EventError,
 			Err: fmt.Errorf("%v", msg["message"])})
 	}
 }
 
-func (s *Session) finishTurn(role string) {
+func (s *Session) markStarted() {
+	s.startedOne.Do(func() {
+		close(s.started)
+		s.emit(Event{Kind: EventStarted})
+	})
+}
+
+func (s *Session) finishTurn(role, eventText string) {
 	user := s.turnUser.String()
 	assistant := s.turnAssistant.String()
 	if assistant == "" {
 		assistant = s.interim.String()
+	}
+	if eventText != "" {
+		if role == "user" {
+			if len([]rune(eventText)) >= len([]rune(user)) {
+				user = eventText
+			}
+		} else if len([]rune(eventText)) >= len([]rune(assistant)) {
+			assistant = eventText
+		}
 	}
 	s.turnUser.Reset()
 	s.turnAssistant.Reset()
@@ -374,17 +474,72 @@ func (s *Session) finishTurn(role string) {
 		Usage: map[string]any{"assistant": assistant}})
 }
 
+func isTranscriptEvent(t string) bool {
+	switch t {
+	case "output_transcript.added", "output_transcript.delta",
+		"input_transcript.added", "input_transcript.delta",
+		"turn.delta":
+		return true
+	default:
+		return strings.Contains(t, "transcription")
+	}
+}
+
+func eventRole(ev map[string]any) string {
+	if role, _ := ev["role"].(string); role != "" {
+		return role
+	}
+	if tt, ok := ev["turn"].(map[string]any); ok {
+		if role, _ := tt["role"].(string); role != "" {
+			return role
+		}
+	}
+	if item, ok := ev["item"].(map[string]any); ok {
+		if role, _ := item["role"].(string); role != "" {
+			return role
+		}
+	}
+	return ""
+}
+
+// applyTranscript merges one gateway transcript event into the turn buffer.
+// Events are sometimes single-character deltas and sometimes growing
+// snapshots; replacing on every event kept only the last character ("?").
+func applyTranscript(dst *strings.Builder, text string) {
+	if text == "" {
+		return
+	}
+	cur := dst.String()
+	switch {
+	case cur == "":
+		dst.WriteString(text)
+	case text == cur:
+	case strings.HasSuffix(cur, text):
+		// added + delta often carry the same chunk
+	case strings.HasPrefix(text, cur):
+		dst.Reset()
+		dst.WriteString(text)
+	case strings.HasPrefix(cur, text):
+	default:
+		dst.WriteString(text)
+	}
+}
+
 // transcriptText extracts delta text from the event, tolerating the
 // several shapes the gateway has used.
 func transcriptText(ev map[string]any) string {
-	for _, k := range []string{"delta", "text"} {
+	for _, k := range []string{"delta", "text", "transcript"} {
 		if s, ok := ev[k].(string); ok && s != "" {
 			return s
 		}
 	}
-	if item, ok := ev["item"].(map[string]any); ok {
-		for _, k := range []string{"text", "transcript"} {
-			if s, ok := item[k].(string); ok && s != "" {
+	for _, k := range []string{"delta", "item", "transcript", "turn"} {
+		m, ok := ev[k].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, ck := range []string{"text", "transcript", "delta"} {
+			if s, ok := m[ck].(string); ok && s != "" {
 				return s
 			}
 		}
@@ -393,16 +548,22 @@ func transcriptText(ev map[string]any) string {
 }
 
 // detectSpeaker distinguishes user vs assistant transcript events.
-func detectSpeaker(ev map[string]any) string {
-	if role, _ := ev["role"].(string); role != "" {
+func detectSpeaker(etype string, ev map[string]any) string {
+	if role := eventRole(ev); role != "" {
 		return role
 	}
-	if item, ok := ev["item"].(map[string]any); ok {
-		if role, _ := item["role"].(string); role != "" {
-			return role
-		}
+	if strings.Contains(etype, "input") {
+		return "user"
 	}
 	return "assistant"
+}
+
+func clipRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
 }
 
 func strField(m map[string]any, keys ...string) string {
@@ -427,6 +588,8 @@ func (s *Session) WaitStarted(ctx context.Context) error {
 // Speak makes the assistant say text verbatim via the speakable channel.
 // Uplink RTP must already be flowing.
 func (s *Session) Speak(text string) error {
+	// Server VAD will hold speakable TTS while the uplink looks busy.
+	s.duckMicUntil.Store(time.Now().Add(4 * time.Second).UnixNano())
 	return s.sendJSON(map[string]any{
 		"type":    "session.context.append",
 		"channel": "speakable",
@@ -477,6 +640,14 @@ func (s *Session) sendJSON(v any) error {
 
 // Events returns the event channel.
 func (s *Session) Events() <-chan Event { return s.events }
+
+// OnPCM registers a callback for each downlink PCM chunk (s16le 24kHz).
+// Used to drive Live2D lip sync from the same stream the player hears.
+func (s *Session) OnPCM(fn func([]byte)) {
+	s.onPCMMu.Lock()
+	s.onPCM = fn
+	s.onPCMMu.Unlock()
+}
 
 // PCM returns all downlink PCM so far (s16le 24kHz mono).
 func (s *Session) PCM() []byte {

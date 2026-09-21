@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -136,11 +137,11 @@ func WriteWAV(path string, pcm []byte, sampleRate int) error {
 	return os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
-// Player streams downlink PCM chunks to a system player
-// (macOS afplay / Linux aplay). Chunked playback avoids buffering the
-// whole session. With no player available it returns nil and callers
-// should fall back to writing a WAV.
+// Player streams downlink PCM to speakers.
+// Backends: winmm (Windows), afplay (macOS), aplay/ffplay (Linux).
+// Chunked file playback is a fallback; winmm streams s16le 24kHz directly.
 type Player struct {
+	kind       string
 	playerPath string
 	tmpDir     string
 	chunk      bytes.Buffer
@@ -148,29 +149,56 @@ type Player struct {
 	counter    atomic.Int64
 	procs      chan *exec.Cmd
 	closed     atomic.Bool
+	stream     func([]byte)
+	closeFn    func()
+}
+
+// Kind is the playback backend name, or "none".
+func (p *Player) Kind() string {
+	if p == nil {
+		return "none"
+	}
+	return p.kind
 }
 
 // NewPlayer probes for a usable player; nil means none found.
 func NewPlayer() *Player {
-	name := "aplay"
-	if runtime.GOOS == "darwin" {
-		name = "afplay"
+	if p := openWinmmPlayer(); p != nil {
+		return p
 	}
-	path, err := exec.LookPath(name)
-	if err != nil {
-		return nil
+	type cand struct{ name, kind string }
+	var names []cand
+	switch runtime.GOOS {
+	case "darwin":
+		names = []cand{{"afplay", "afplay"}, {"ffplay", "ffplay"}}
+	case "windows":
+		names = []cand{{"ffplay", "ffplay"}}
+	default:
+		names = []cand{{"aplay", "aplay"}, {"ffplay", "ffplay"}}
 	}
-	return &Player{
-		playerPath: path,
-		tmpDir:     filepath.Join(os.TempDir(), "tavernbot-audio"),
-		chunkBytes: DownlinkRate * 2, // ~1s PCM
-		procs:      make(chan *exec.Cmd, 64),
+	for _, n := range names {
+		path, err := exec.LookPath(n.name)
+		if err != nil {
+			continue
+		}
+		return &Player{
+			kind:       n.kind,
+			playerPath: path,
+			tmpDir:     filepath.Join(os.TempDir(), "tavernbot-audio"),
+			chunkBytes: DownlinkRate * 2 / 5, // ~200ms
+			procs:      make(chan *exec.Cmd, 64),
+		}
 	}
+	return nil
 }
 
 // WritePCM accumulates downlink PCM; full chunks play asynchronously.
 func (p *Player) WritePCM(pcm []byte) {
-	if p == nil || len(pcm) == 0 {
+	if p == nil || len(pcm) == 0 || p.closed.Load() {
+		return
+	}
+	if p.stream != nil {
+		p.stream(pcm)
 		return
 	}
 	p.chunk.Write(pcm)
@@ -183,7 +211,7 @@ func (p *Player) WritePCM(pcm []byte) {
 
 // Flush plays the remaining partial chunk.
 func (p *Player) Flush() {
-	if p == nil {
+	if p == nil || p.stream != nil {
 		return
 	}
 	if p.chunk.Len() > 0 {
@@ -206,9 +234,12 @@ func (p *Player) playBlock(pcm []byte) {
 	}
 	go func() {
 		var cmd *exec.Cmd
-		if filepath.Base(p.playerPath) == "afplay" {
+		switch p.kind {
+		case "afplay":
 			cmd = exec.Command(p.playerPath, name)
-		} else {
+		case "ffplay":
+			cmd = exec.Command(p.playerPath, "-nodisp", "-autoexit", "-loglevel", "quiet", name)
+		default:
 			cmd = exec.Command(p.playerPath, "-q", name)
 		}
 		select {
@@ -226,6 +257,10 @@ func (p *Player) Close() {
 		return
 	}
 	p.closed.Store(true)
+	if p.closeFn != nil {
+		p.closeFn()
+		return
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		select {
@@ -273,3 +308,167 @@ func SilenceFrames(stop <-chan struct{}) <-chan []byte {
 
 // ErrNoMicDevice means no capture device is available in this build.
 var ErrNoMicDevice = errors.New("microphone capture requires build tag tavern_mic; using silence uplink")
+
+var micFormat atomic.Value
+
+func setMicFormat(s string) { micFormat.Store(s) }
+
+// MicFormat is the last successful OpenMic backend description.
+func MicFormat() string {
+	s, _ := micFormat.Load().(string)
+	if s == "" {
+		return "none"
+	}
+	return s
+}
+
+// micPickScore prefers built-in mic arrays over empty analog jacks
+// that hiss, and over virtual/loopback devices.
+func micPickScore(name string, rms float64) float64 {
+	s := rms
+	nl := strings.ToLower(name)
+	if strings.Contains(name, "阵列") || strings.Contains(nl, "array") {
+		s += 1
+	}
+	if strings.Contains(name, "智音") || strings.Contains(nl, "intel") {
+		s += 0.3
+	}
+	if strings.Contains(name, "虚拟") || strings.Contains(nl, "virtual") {
+		s -= 1
+	}
+	if strings.Contains(name, "外部") || strings.Contains(nl, "external") || strings.Contains(nl, "line in") {
+		s -= 0.5
+	}
+	if strings.Contains(name, "立体声混音") || strings.Contains(nl, "stereo mix") {
+		s -= 1
+	}
+	return s
+}
+
+// MixStereoS16LE averages interleaved s16le stereo into mono.
+func MixStereoS16LE(pcm []byte) []byte {
+	n := len(pcm) / 4
+	if n == 0 {
+		return nil
+	}
+	out := make([]byte, n*2)
+	for i := 0; i < n; i++ {
+		l := int32(int16(binary.LittleEndian.Uint16(pcm[i*4:])))
+		r := int32(int16(binary.LittleEndian.Uint16(pcm[i*4+2:])))
+		binary.LittleEndian.PutUint16(out[i*2:], uint16(int16((l+r)/2)))
+	}
+	return out
+}
+
+// PCMToUplinkUlaw converts s16le PCM at sampleRate/channels into 8kHz mu-law.
+func PCMToUplinkUlaw(pcm []byte, sampleRate, channels int) []byte {
+	if channels == 2 {
+		pcm = MixStereoS16LE(pcm)
+	}
+	if sampleRate != PCMUUplinkRate {
+		if sampleRate%PCMUUplinkRate == 0 {
+			pcm = DecimateS16LE(pcm, sampleRate/PCMUUplinkRate)
+		} else {
+			pcm = ResamplePCM(pcm, sampleRate, PCMUUplinkRate)
+		}
+	}
+	return MuLawEncodeBytes(pcm)
+}
+
+// DecimateS16LE downsamples by an integer factor with a boxcar average
+// so 16/48kHz capture does not alias into the 8kHz speech band.
+func DecimateS16LE(pcm []byte, factor int) []byte {
+	if factor <= 1 || len(pcm) < 2 {
+		return pcm
+	}
+	n := len(pcm) / 2
+	outN := n / factor
+	if outN < 1 {
+		return pcm
+	}
+	out := make([]byte, outN*2)
+	for i := 0; i < outN; i++ {
+		var sum int32
+		base := i * factor
+		for j := 0; j < factor; j++ {
+			sum += int32(int16(binary.LittleEndian.Uint16(pcm[(base+j)*2:])))
+		}
+		binary.LittleEndian.PutUint16(out[i*2:], uint16(int16(sum/int32(factor))))
+	}
+	return out
+}
+
+// UlawRMS is the 0..1 RMS of a mu-law frame (0xFF silence decodes to 0).
+func UlawRMS(ulaw []byte) float64 {
+	n := len(ulaw)
+	if n == 0 {
+		return 0
+	}
+	var sum float64
+	for _, b := range ulaw {
+		s := float64(MulawDecodeTable[b])
+		sum += s * s
+	}
+	return math.Sqrt(sum/float64(n)) / 32768.0
+}
+
+const mouthWindow = 480 // 20ms at 24kHz; long deltas otherwise smear syllables.
+
+// MouthOpen maps s16le PCM to 0..1 mouth openness from the latest 20ms.
+// Downlink silence (near-zero energy) returns 0 so the avatar closes its mouth.
+func MouthOpen(pcm []byte) float64 {
+	n := len(pcm) / 2
+	if n == 0 {
+		return 0
+	}
+	if n > mouthWindow {
+		pcm = pcm[(n-mouthWindow)*2:]
+		n = mouthWindow
+	}
+	var sum, peak float64
+	for i := 0; i < n; i++ {
+		s := math.Abs(float64(int16(binary.LittleEndian.Uint16(pcm[i*2:]))))
+		sum += s * s
+		if s > peak {
+			peak = s
+		}
+	}
+	rms := math.Sqrt(sum/float64(n)) / 32768.0
+	level := rms*0.65 + (peak/32768.0)*0.35
+	const noise = 0.01
+	if level < noise {
+		return 0
+	}
+	v := (level - noise) / 0.14
+	if v > 1 {
+		v = 1
+	}
+	return math.Sqrt(v)
+}
+
+// MouthEnvelope is a synthetic speak/pause curve for --lipsync demos.
+// Period is 2.4s: ~0.9s of syllables then rest.
+func MouthEnvelope(t float64) float64 {
+	if t < 0 {
+		return 0
+	}
+	cycle := math.Mod(t, 2.4)
+	if cycle >= 0.9 {
+		return 0
+	}
+	return math.Abs(math.Sin(cycle*18)) * (0.4 + 0.6*math.Abs(math.Sin(cycle*7)))
+}
+
+// TonePCM renders a sine wave as s16le 24kHz mono.
+func TonePCM(freq, seconds float64) []byte {
+	if seconds <= 0 {
+		return nil
+	}
+	n := int(float64(DownlinkRate) * seconds)
+	pcm := make([]byte, n*2)
+	for i := 0; i < n; i++ {
+		s := int16(math.Sin(2*math.Pi*freq*float64(i)/float64(DownlinkRate)) * 9000)
+		binary.LittleEndian.PutUint16(pcm[i*2:], uint16(s))
+	}
+	return pcm
+}

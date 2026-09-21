@@ -2,10 +2,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/jingx8885/lov-evo/internal/agent"
 	"github.com/jingx8885/lov-evo/internal/audio"
+	"github.com/jingx8885/lov-evo/internal/avatar"
 	"github.com/jingx8885/lov-evo/internal/config"
 	"github.com/jingx8885/lov-evo/internal/jev"
 	"github.com/jingx8885/lov-evo/internal/judge"
@@ -46,6 +49,8 @@ func main() {
 		os.Exit(cmdDoctor(args))
 	case "ctxprobe":
 		os.Exit(cmdCtxProbe(args))
+	case "live2d":
+		os.Exit(cmdLive2D(args))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", cmd)
 		usage()
@@ -62,14 +67,16 @@ Commands:
   probe   connectivity check: call create, session.started, RTP echo
   judge   judge one text with Jev (no voice)
   plan    force one async planner refresh (prints the resulting note)
-  doctor  local environment check (no network)
+  doctor    local environment check (no network)
+  ctxprobe  experiment with session.context.append channels
+  live2d    serve the Haru viewer (Jev frames + lip sync over WebSocket)
 `)
 }
 
-func commonFlags(fs *flag.FlagSet) (baseURL, personaPath, key string, verbose *bool) {
-	baseURL = *fs.String("base-url", "", "new-api base URL (default NEW_API_BASE_URL or "+config.DefaultBaseURL+")")
-	personaPath = *fs.String("persona", "personas/tavern_keeper.yaml", "persona YAML")
-	key = *fs.String("key", "", "API key (default resolves env/credentials)")
+func commonFlags(fs *flag.FlagSet) (baseURL, personaPath, key *string, verbose *bool) {
+	baseURL = fs.String("base-url", "", "new-api base URL (default NEW_API_BASE_URL or "+config.DefaultBaseURL+")")
+	personaPath = fs.String("persona", "personas/haru.yaml", "persona YAML")
+	key = fs.String("key", "", "API key (default resolves env/credentials)")
 	verbose = fs.Bool("v", false, "verbose")
 	return
 }
@@ -102,20 +109,34 @@ func cmdRun(args []string) int {
 	jevModel := fs.String("jev-model", config.DefaultJevModel, "System One model")
 	plannerModel := fs.String("planner-model", config.DefaultPlannerModel, "planner LLM")
 	runsDir := fs.String("runs-dir", "runs", "session log directory")
-	greeting := fs.Bool("greeting", true, "speak persona greeting on start")
+	greeting := fs.Bool("greeting", false, "speak a scripted persona greeting on start (off: wait for the user, Jev steers)")
+	live2dAddr := fs.String("live2d", "127.0.0.1:8787", "Live2D viewer addr; off to disable")
+	live2dDir := fs.String("live2d-dir", "", "web/live2d directory")
+	noBrowser := fs.Bool("no-browser", false, "do not open the Live2D viewer")
+	say := fs.String("say", "", "speak this text once after the session starts")
+	quitAfter := fs.Duration("quit-after", 0, "exit after this duration (0 = until Ctrl+C / /quit)")
 	fs.Parse(args)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if *quitAfter > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *quitAfter)
+		defer cancel()
+	}
 	err := agent.Run(ctx, agent.Options{
-		BaseURL:      config.ResolveBaseURL(baseURL),
-		APIKey:       mustKey(key),
-		PersonaPath:  personaPath,
+		BaseURL:      config.ResolveBaseURL(*baseURL),
+		APIKey:       mustKey(*key),
+		PersonaPath:  *personaPath,
 		JevModel:     *jevModel,
 		PlannerModel: *plannerModel,
 		RunsDir:      *runsDir,
 		Greeting:     *greeting,
 		Verbose:      *verbose,
+		Live2DAddr:   *live2dAddr,
+		Live2DDir:    *live2dDir,
+		OpenViewer:   !*noBrowser,
+		Say:          *say,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -126,7 +147,7 @@ func cmdRun(args []string) int {
 
 func cmdSpeak(args []string) int {
 	fs := flag.NewFlagSet("speak", flag.ExitOnError)
-	baseURL, _, key, _ := commonFlags(fs)
+	baseURL, _, key, verbose := commonFlags(fs)
 	text := fs.String("text", "", "text to speak")
 	textFile := fs.String("text-file", "", "file with text")
 	voice := fs.String("voice", "cove", "voice")
@@ -151,7 +172,7 @@ func cmdSpeak(args []string) int {
 		*out = fmt.Sprintf("speak-%d.wav", time.Now().Unix())
 	}
 	ctx := context.Background()
-	sess, err := livevoice.Connect(ctx, config.ResolveBaseURL(baseURL), mustKey(key),
+	sess, err := livevoice.Connect(ctx, config.ResolveBaseURL(*baseURL), mustKey(*key),
 		"Speak the user's text exactly as written. Do not add, remove, explain, or answer anything.",
 		*voice)
 	if err != nil {
@@ -159,6 +180,7 @@ func cmdSpeak(args []string) int {
 		return 1
 	}
 	defer sess.Close()
+	sess.Verbose = *verbose
 	wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	if err := sess.WaitStarted(wctx); err != nil {
 		cancel()
@@ -178,14 +200,22 @@ func cmdSpeak(args []string) int {
 		select {
 		case ev := <-sess.Events():
 			if ev.Kind == livevoice.EventTurnDone {
+				assistant, _ := ev.Usage["assistant"].(string)
+				fmt.Printf("turn.done user=%q assistant=%q\n", ev.Text, assistant)
 				goto done
 			}
 		case <-time.After(500 * time.Millisecond):
 		}
 		n := int64(len(sess.PCM()))
 		if n != lastBytes {
+			tail := sess.PCM()
+			if len(tail) > 1920 {
+				tail = tail[len(tail)-1920:]
+			}
 			lastBytes = n
-			quietSince = time.Now()
+			if audio.MouthOpen(tail) > 0 {
+				quietSince = time.Now()
+			}
 		} else if time.Since(quietSince) > 4*time.Second && lastBytes > 0 {
 			goto done
 		}
@@ -214,7 +244,7 @@ func cmdProbe(args []string) int {
 	baseURL, _, key, _ := commonFlags(fs)
 	fs.Parse(args)
 	ctx := context.Background()
-	sess, err := livevoice.Connect(ctx, config.ResolveBaseURL(baseURL), mustKey(key),
+	sess, err := livevoice.Connect(ctx, config.ResolveBaseURL(*baseURL), mustKey(*key),
 		"You are a connectivity probe.", "cove")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -253,13 +283,14 @@ func cmdJudge(args []string) int {
 	fs := flag.NewFlagSet("judge", flag.ExitOnError)
 	baseURL, personaPath, key, _ := commonFlags(fs)
 	text := fs.String("text", "", "user text to judge")
+	live2dURL := fs.String("live2d", "", "POST drive frame to viewer origin, e.g. http://127.0.0.1:8787")
 	fs.Parse(args)
 	if strings.TrimSpace(*text) == "" {
 		fmt.Fprintln(os.Stderr, "--text required")
 		return 2
 	}
-	p := mustPersona(personaPath)
-	jc := jev.NewClient(config.ResolveBaseURL(baseURL), mustKey(key), "")
+	p := mustPersona(*personaPath)
+	jc := jev.NewClient(config.ResolveBaseURL(*baseURL), mustKey(*key), "")
 	mem := memory.New(8)
 	jd, err := judge.JudgeTurn(context.Background(), jc, p, mem, *text)
 	if err != nil {
@@ -268,6 +299,24 @@ func cmdJudge(args []string) int {
 	}
 	raw, _ := json.MarshalIndent(jd, "", "  ")
 	fmt.Println(string(raw))
+	if strings.TrimSpace(*live2dURL) != "" {
+		mem.UpdateAffect(jd.Valence, jd.Arousal, jd.Emotion, jd.SafetyP >= p.Judge.SafetyThresh)
+		mode := judge.DecideMode(jd, mem.Affect(), p.Judge.SafetyThresh, "")
+		frame := avatar.Drive(mode, jd, mem.Affect())
+		body, _ := json.Marshal(frame)
+		url := strings.TrimRight(*live2dURL, "/") + "/drive"
+		resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "live2d push:", err)
+			return 1
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= 300 {
+			fmt.Fprintf(os.Stderr, "live2d push: HTTP %d\n", resp.StatusCode)
+			return 1
+		}
+		fmt.Printf("live2d pushed mode=%s expression=%s\n", frame.Mode, frame.Expression)
+	}
 	return 0
 }
 
@@ -276,9 +325,9 @@ func cmdPlan(args []string) int {
 	baseURL, personaPath, key, _ := commonFlags(fs)
 	plannerModel := fs.String("planner-model", config.DefaultPlannerModel, "planner LLM")
 	fs.Parse(args)
-	p := mustPersona(personaPath)
-	base := config.ResolveBaseURL(baseURL)
-	k := mustKey(key)
+	p := mustPersona(*personaPath)
+	base := config.ResolveBaseURL(*baseURL)
+	k := mustKey(*key)
 	pl := planner.New(p,
 		jev.NewClient(base, k, ""),
 		llm.NewClient(base, k, *plannerModel), *plannerModel)
@@ -304,14 +353,47 @@ func cmdDoctor(args []string) int {
 		fmt.Println("api_key: resolved")
 	}
 	if p := audio.NewPlayer(); p != nil {
-		fmt.Println("player: ok")
+		fmt.Println("player:", p.Kind())
+		p.WritePCM(audio.TonePCM(880, 0.35))
+		time.Sleep(500 * time.Millisecond)
+		p.Close()
 	} else {
-		fmt.Println("player: none (afplay/aplay not found; WAV only)")
+		fmt.Println("player: none")
 	}
-	if _, _, err := audio.OpenMic(audio.PCMUUplinkRate); err != nil {
+	if ch, stop, err := audio.OpenMic(audio.PCMUUplinkRate); err != nil {
 		fmt.Println("mic:", err)
 	} else {
-		fmt.Println("mic: device build")
+		var max float64
+		n := 0
+		deadline := time.Now().Add(700 * time.Millisecond)
+	micLoop:
+		for time.Now().Before(deadline) {
+			select {
+			case f, ok := <-ch:
+				if !ok {
+					break micLoop
+				}
+				n++
+				if r := audio.UlawRMS(f); r > max {
+					max = r
+				}
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+		if stop != nil {
+			stop()
+		}
+		fmt.Printf("mic: ready format=%s frames=%d max_rms=%.4f\n", audio.MicFormat(), n, max)
+		if n == 0 {
+			fmt.Println("mic: warning: no frames in 700ms")
+		} else if max < 0.002 {
+			fmt.Println("mic: warning: digital silence; capture format may be wrong")
+		}
+	}
+	if dir, err := avatar.FindDir(""); err != nil {
+		fmt.Println("live2d:", err)
+	} else {
+		fmt.Println("live2d:", dir)
 	}
 	return 0
 }
@@ -326,7 +408,7 @@ func cmdCtxProbe(args []string) int {
 	respond := fs.Bool("respond", false, "also send response.create")
 	fs.Parse(args)
 	ctx := context.Background()
-	sess, err := livevoice.Connect(ctx, config.ResolveBaseURL(baseURL), mustKey(key),
+	sess, err := livevoice.Connect(ctx, config.ResolveBaseURL(*baseURL), mustKey(*key),
 		"You are a probe.", "cove")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -359,4 +441,81 @@ func cmdCtxProbe(args []string) int {
 		}
 	}
 	return 0
+}
+
+func cmdLive2D(args []string) int {
+	fs := flag.NewFlagSet("live2d", flag.ExitOnError)
+	addr := fs.String("addr", "127.0.0.1:8787", "listen address")
+	dir := fs.String("dir", "", "web/live2d directory")
+	demo := fs.Bool("demo", false, "cycle steering modes so Haru visibly reacts")
+	lipsync := fs.Bool("lipsync", false, "synthetic mouth motion (no voice)")
+	noBrowser := fs.Bool("no-browser", false, "do not open the browser")
+	fs.Parse(args)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	hub, url, err := avatar.Listen(ctx, avatar.ListenOptions{
+		Addr:  *addr,
+		Dir:   *dir,
+		Open:  !*noBrowser,
+		LogFn: func(s string) { fmt.Println(s) },
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if *demo {
+		fmt.Println("demo: cycling Jev modes every 4s")
+		go cycleLive2DDemo(ctx, hub)
+	}
+	if *lipsync {
+		fmt.Println("lipsync: synthetic mouth envelope")
+		go cycleMouthDemo(ctx, hub)
+	}
+	fmt.Println("open", url, " — Ctrl+C to stop")
+	<-ctx.Done()
+	return 0
+}
+
+func cycleLive2DDemo(ctx context.Context, hub *avatar.Hub) {
+	samples := []struct {
+		mode string
+		j    judge.Judgment
+	}{
+		{"continue", judge.Judgment{Emotion: "neutral", Valence: 0.5, Arousal: 0.4, Engagement: 0.6}},
+		{"comfort", judge.Judgment{Emotion: "sadness", Valence: 0.2, Arousal: 0.3, Engagement: 0.8}},
+		{"de_escalate", judge.Judgment{Emotion: "anger", Valence: 0.3, Arousal: 0.7, Engagement: 0.7}},
+		{"celebrate", judge.Judgment{Emotion: "joy", Valence: 0.9, Arousal: 0.8, Engagement: 0.9}},
+		{"re_engage", judge.Judgment{Emotion: "neutral", Valence: 0.5, Arousal: 0.4, Engagement: 0.15}},
+		{"goal_push", judge.Judgment{Emotion: "neutral", Valence: 0.65, Arousal: 0.55, Engagement: 0.8}},
+		{"safety", judge.Judgment{Emotion: "fear", Valence: 0.15, Arousal: 0.6, Engagement: 0.5, SafetyP: 0.9}},
+	}
+	i := 0
+	tick := time.NewTicker(4 * time.Second)
+	defer tick.Stop()
+	for {
+		s := samples[i%len(samples)]
+		a := memory.Affect{Valence: s.j.Valence, Arousal: s.j.Arousal, Emotion: s.j.Emotion}
+		hub.Publish(avatar.Drive(s.mode, &s.j, a))
+		i++
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+func cycleMouthDemo(ctx context.Context, hub *avatar.Hub) {
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	t0 := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			hub.Mouth(audio.MouthEnvelope(time.Since(t0).Seconds()))
+		}
+	}
 }
