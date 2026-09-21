@@ -1,4 +1,4 @@
-//go:build windows && !tavern_mic
+//go:build windows
 
 package audio
 

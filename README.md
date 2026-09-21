@@ -77,6 +77,11 @@
 
     go build -tags tavern_mic ./cmd/tavernbot   # 需要 cgo / miniaudio
 
+设备选择：`TAVERN_MIC=<设备名片段>` 可强制指定；否则枚举所有采集设备，
+短暂探测输入 RMS 后用 `micPickScore` 挑最可能的一个（系统默认输入可能是
+只出数字静音的虚拟驱动，比如远控软件的音频管道；无内置麦克风的机器尤其如此）。
+上行持续静音 6 秒会打出 `[voice warning]`；macOS 首次采集会弹麦克风权限。
+
 下行音频：Windows 走 winmm 流式播放，macOS `afplay`，Linux `aplay`/`ffplay`。Live2D 页面只跟口型和表情，避免和第二路扬声器叠成回声。
 
 ## 协议事实（已验证）

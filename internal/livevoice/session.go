@@ -34,6 +34,7 @@ const (
 	EventTurnDone   = "turn_done"  // a conversational turn completed
 	EventTranscript = "transcript" // incremental text (user or assistant)
 	EventUsage      = "usage"
+	EventWarning    = "warning" // non-fatal: silent mic, degraded uplink
 	EventError      = "error"
 	EventClosed     = "closed"
 )
@@ -260,6 +261,7 @@ func (s *Session) uplink(ctx context.Context) {
 	micFrames, micStop, err := audio.OpenMic(audio.PCMUUplinkRate)
 	if err != nil {
 		s.logf("uplink: %v", err)
+		s.emit(Event{Kind: EventWarning, Err: err})
 	} else {
 		s.logf("uplink: microphone %s", audio.MicFormat())
 	}
@@ -305,7 +307,9 @@ func (s *Session) uplink(ctx context.Context) {
 // read stuffed silence whenever a mic frame was 1ms late, which shreds ASR.
 func (s *Session) uplinkMic(ctx context.Context, micFrames <-chan []byte, write func([]byte), silence []byte) {
 	var n, ducked int
-	var maxRMS float64
+	var maxRMS, peakRMS float64
+	start := time.Now()
+	warned := false
 	lastLog := time.Now()
 	stall := time.NewTimer(80 * time.Millisecond)
 	defer stall.Stop()
@@ -329,6 +333,15 @@ func (s *Session) uplinkMic(ctx context.Context, micFrames <-chan []byte, write 
 			}
 			if r := audio.UlawRMS(f); r > maxRMS {
 				maxRMS = r
+			}
+			if maxRMS > peakRMS {
+				peakRMS = maxRMS
+			}
+			if !warned && time.Since(start) > 6*time.Second && peakRMS < 0.002 {
+				warned = true
+				s.emit(Event{Kind: EventWarning, Err: fmt.Errorf(
+					"mic has produced only silence for 6s (%s); speech will not be recognized "+
+						"- check the input device (TAVERN_MIC can force one) and mic permission", audio.MicFormat())})
 			}
 			frame := f
 			if time.Now().UnixNano() < s.duckMicUntil.Load() {

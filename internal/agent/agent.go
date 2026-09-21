@@ -144,6 +144,8 @@ func Run(ctx context.Context, opt Options) error {
 				if ev.Speaker == "user" {
 					opt.log("[user~] %s", clip(ev.Text, 120))
 				}
+			case livevoice.EventWarning:
+				opt.log("[voice warning] %v", ev.Err)
 			case livevoice.EventError:
 				opt.log("[voice error] %v", ev.Err)
 			case livevoice.EventClosed:
