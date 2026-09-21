@@ -5,6 +5,7 @@ package avatar
 
 import (
 	"math"
+	"strings"
 
 	"github.com/jingx8885/lov-evo/internal/judge"
 	"github.com/jingx8885/lov-evo/internal/memory"
@@ -28,26 +29,29 @@ const (
 
 // Frame is one Live2D pose instruction pushed over WebSocket.
 type Frame struct {
-	Type        string             `json:"type"`
-	Mode        string             `json:"mode"`
-	Emotion     string             `json:"emotion"`
-	Expression  string             `json:"expression"`
-	MotionGroup string             `json:"motion_group"`
-	MotionIndex int                `json:"motion_index"`
-	Valence     float64            `json:"valence"`
-	Arousal     float64            `json:"arousal"`
-	Engagement  float64            `json:"engagement"`
-	SafetyP     float64            `json:"safety_p"`
-	LookAt      float64            `json:"look_at"`
-	Intensity   float64            `json:"intensity"`
-	NeedLLM     float64            `json:"need_llm"`
-	UserText    string             `json:"user_text,omitempty"`
-	Params      map[string]float64 `json:"params,omitempty"`
+	Type              string             `json:"type"`
+	Mode              string             `json:"mode"`
+	Emotion           string             `json:"emotion"`
+	SelfEmotion       string             `json:"self_emotion,omitempty"`
+	Expression        string             `json:"expression"`
+	MotionGroup       string             `json:"motion_group"`
+	MotionIndex       int                `json:"motion_index"`
+	Valence           float64            `json:"valence"`
+	Arousal           float64            `json:"arousal"`
+	Engagement        float64            `json:"engagement"`
+	SafetyP           float64            `json:"safety_p"`
+	LookAt            float64            `json:"look_at"`
+	Intensity         float64            `json:"intensity"`
+	NeedLLM           float64            `json:"need_llm"`
+	RelationshipStage string             `json:"relationship_stage,omitempty"`
+	Bond              float64            `json:"bond,omitempty"`
+	UserText          string             `json:"user_text,omitempty"`
+	Params            map[string]float64 `json:"params,omitempty"`
 }
 
 // Drive turns a steering mode + Jev judgment + running affect into a frame.
-// The face follows this turn's Jev emotion/valence/arousal. Mode only
-// picks motion and is the safety override; it does not relabel the face.
+// The face follows her own feeling first; the user's emotion is context, not
+// the thing she mirrors one-to-one.
 func Drive(mode string, j *judge.Judgment, a memory.Affect) Frame {
 	if j == nil {
 		j = &judge.Judgment{Emotion: "neutral"}
@@ -56,15 +60,16 @@ func Drive(mode string, j *judge.Judgment, a memory.Affect) Frame {
 		mode = "continue"
 	}
 	f := Frame{
-		Type:       "drive",
-		Mode:       mode,
-		Emotion:    j.Emotion,
-		Valence:    j.Valence,
-		Arousal:    j.Arousal,
-		Engagement: j.Engagement,
-		SafetyP:    j.SafetyP,
-		NeedLLM:    j.NeedLLMP,
-		UserText:   j.UserText,
+		Type:        "drive",
+		Mode:        mode,
+		Emotion:     j.Emotion,
+		SelfEmotion: j.SelfEmotion,
+		Valence:     j.Valence,
+		Arousal:     j.Arousal,
+		Engagement:  j.Engagement,
+		SafetyP:     j.SafetyP,
+		NeedLLM:     j.NeedLLMP,
+		UserText:    j.UserText,
 	}
 	if f.Valence == 0 && a.Valence != 0 {
 		f.Valence = a.Valence
@@ -83,6 +88,15 @@ func Drive(mode string, j *judge.Judgment, a memory.Affect) Frame {
 	return f
 }
 
+// DriveWithRelationship is the live turn's face state plus the relationship
+// scene, so the same mode can look warmer as the bond grows.
+func DriveWithRelationship(mode string, j *judge.Judgment, a memory.Affect, cue memory.RelationshipCue) Frame {
+	f := Drive(mode, j, a)
+	f.RelationshipStage = cue.Stage
+	f.Bond = bondScore(cue)
+	return f
+}
+
 func expressionFor(mode string, j *judge.Judgment) string {
 	if mode == "safety" {
 		return ExpSoft
@@ -90,9 +104,13 @@ func expressionFor(mode string, j *judge.Judgment) string {
 	if j == nil {
 		return ExpNeutral
 	}
-	switch j.Emotion {
+	self := strings.ToLower(strings.TrimSpace(j.SelfEmotion))
+	if self == "" {
+		self = strings.ToLower(strings.TrimSpace(j.Emotion))
+	}
+	switch self {
 	case "joy":
-		if j.Arousal > 0.65 || j.Valence >= 0.8 {
+		if j.Arousal > 0.68 || j.Valence >= 0.8 {
 			return ExpPlay
 		}
 		return ExpBright
@@ -160,7 +178,11 @@ func overlayFor(mode string, j *judge.Judgment, intensity float64) map[string]fl
 		p["ParamTear"] = 0.4 * k
 		return p
 	}
-	switch j.Emotion {
+	self := strings.ToLower(strings.TrimSpace(j.SelfEmotion))
+	if self == "" {
+		self = strings.ToLower(strings.TrimSpace(j.Emotion))
+	}
+	switch self {
 	case "joy":
 		p["ParamTere"] = clamp01(0.45+j.Valence*0.55) * k
 		p["ParamMouthForm"] = clamp01(0.35+j.Valence*0.6) * k
@@ -199,6 +221,19 @@ func overlayFor(mode string, j *judge.Judgment, intensity float64) map[string]fl
 		return nil
 	}
 	return p
+}
+
+func bondScore(cue memory.RelationshipCue) float64 {
+	switch strings.ToLower(strings.TrimSpace(cue.Stage)) {
+	case "信任":
+		return 0.62
+	case "亲密":
+		return 0.88
+	case "熟悉":
+		return 0.36
+	default:
+		return 0.12
+	}
 }
 
 func clamp01(v float64) float64 {

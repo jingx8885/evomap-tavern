@@ -24,11 +24,13 @@ html, body {
   position: fixed;
   top: 16px;
   left: 16px;
-  width: 260px;
+  width: 272px;
   padding: 14px 16px;
-  background: var(--panel);
+  background: linear-gradient(180deg, rgba(30,26,22,0.92), rgba(20,17,14,0.86));
   border: 1px solid var(--line);
   color: var(--ink);
+  border-radius: 18px;
+  box-shadow: 0 18px 60px rgba(0,0,0,0.24);
 }
 #hud header {
   display: flex;
@@ -51,7 +53,7 @@ html, body {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  padding: 3px 0;
+  padding: 5px 0;
   border-bottom: 1px solid var(--line);
 }
 dt {
@@ -88,12 +90,13 @@ dd {
 }
 #eyes button,
 #modes button {
-  background: transparent;
+  background: rgba(255,255,255,0.02);
   color: var(--ink);
   border: 1px solid var(--line);
   padding: 4px 8px;
   cursor: pointer;
   font: inherit;
+  border-radius: 999px;
 }
 #eyes button:hover,
 #eyes button.active,
@@ -131,4 +134,15 @@ dd {
   margin: 0;
   color: var(--muted);
   font-size: 12px;
+}
+
+#relationship,
+#self-emotion,
+#doing,
+#scene {
+  max-width: 150px;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

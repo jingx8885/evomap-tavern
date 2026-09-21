@@ -1,8 +1,8 @@
 # lov-evo
 
-**进化酒馆的人格对话机器人**：Jev（System One）做结构化情感判断与异步门控，LLM 做长期规划，OpenAI 双工语音（gpt-live）做对话。
+**进化酒馆的人格语音角色**：Jev（System One）做结构化情感判断与异步门控，LLM 做长期规划，OpenAI 双工语音（gpt-live）做对话。
 
-为 EvoMap 进化酒馆场景而生：一个能感知情绪、贴着人设说话、并且有长期方向的酒馆角色。
+为 EvoMap 进化酒馆场景而生：一个能感知情绪、贴着人设说话、有长期方向、也会把关系慢慢养出来的桌面角色。
 
 ## 架构
 
@@ -41,6 +41,7 @@
 - **LLM 长期规划**是异步的：Jev 先做门控判断（是否自然停顿 + 目标是否未达成），通过后才发 chat.completions 刷新 plan note；refine 跑在 goroutine 里，不阻塞语音。
 - **人设**是 YAML，换文件即换角色：`personas/tavern_keeper.yaml`（老板娘）和 `personas/lore_bard.yaml`（吟游诗人）。
 - **短期记忆**是 EMA 情感状态 + 最近 N 轮文本，给 Jev 和 planner 当 state。
+- **关系记忆**是持久化账本：`runs/relationship-<persona>.json` 记关系阶段、未结事项、共同经历、约定和内部梗；每轮只把最相关的一小段注入 steering，避免把数据库念给双工。
 
 ## 快速开始
 
@@ -99,15 +100,15 @@
 1. `judge.JudgeTurn` 发一次 `/v1/systemone`，题型固定（score×3 + choice + noul×2），全部并行。
 2. `memory.UpdateAffect` 把 valence/arousal 折进 EMA，safety 置 sticky 标志。
 3. `judge.DecideMode` 选模式（safety > comfort/de_escalate/celebrate > re_engage > goal_push > continue）。
-4. `steering.Build` 组合成 guidance，`session.context.append` + `channel:"developer"` 注入语音会话。
-5. `planner.Tick` 每 N 轮问 Jev 是否到自然停顿且目标未尽；过了就异步让 LLM 刷新 plan note。
-6. 同一帧 `avatar.Drive` 把 **steering mode**（不是用户脸）映射成 Haru 表情/动作，经 WebSocket 推到查看器。
+4. `steering.BuildWithScene` 组合当前场景、角色圣经、她自己的 `self_emotion` 和关系账本摘要，`session.context.append` + `channel:"developer"` 注入语音会话。
+5. `planner.Consider` 复用本轮 Jev 的 `need_llm` 分数决定是否异步刷新 plan note，不再为门控额外打一次 System One。
+6. 同一帧 `avatar.DriveWithRelationship` 把 **小春自己的情绪 + steering mode + 关系阶段** 映射成 Haru 表情/动作，经 WebSocket 推到查看器；用户的情绪是输入，不是她要镜像的目标。
 
 阈值在 persona YAML 的 `judge.*` 和 `planner.*` 里改。
 
 ## Live2D
 
-查看器在 `web/live2d`，默认模型是官方样本 **Haru**（来自 [CubismWebSamples](https://github.com/Live2D/CubismWebSamples)），和 vale 这类偏亮少女声更搭。角色按 Jev 的 persona 反应驱动：客人难过 → `comfort` → 软表情；高兴 → `celebrate` → 笑眼 + TapBody。下行 PCM 的能量映射到 `ParamMouthOpenY` 做口型，情感参数在 Idle 动作之后每帧叠上去。`live2d --lipsync` 可在没语音时看张嘴。
+查看器在 `web/live2d`，默认模型是官方样本 **Haru**（来自 [CubismWebSamples](https://github.com/Live2D/CubismWebSamples)），现在前台展示的是“小春 · 桌面陪伴”而不是调试面板。角色按 Jev 的 persona 反应驱动：客人难过 → `comfort` → 小春自己的情绪先落到脸上；关系越深，界面里的“关系/心情/正在做”越有连续性。下行 PCM 的能量映射到 `ParamMouthOpenY` 做口型，情感参数在 Idle 动作之后每帧叠上去。`live2d --lipsync` 可在没语音时看张嘴。
 
 Cubism Core 从 Live2D CDN 加载，首次需要能上网。Haru / Mao 素材受 [Live2D 免费素材协议](https://www.live2d.jp/en/terms/live2d-free-material-license-agreement/) 约束，不在 Apache-2.0 范围内。
 
@@ -118,14 +119,14 @@ Cubism Core 从 Live2D CDN 加载，首次需要能上网。Haru / Mao 素材受
       config/               base URL + 凭证解析
       jev/                  System One 客户端（/v1/systemone）
       judge/                每轮情感/人设判断 + mode 决策
-      memory/               短期记忆 + EMA 情感状态
+      memory/               短期记忆 + EMA 情感状态 + 持久化关系账本
       planner/              Jev 门控 + 异步 LLM 规划
       steering/             judgment → instructions 组装
       llm/                  chat.completions 客户端
       audio/                μ-law 编解码、重采样、WAV、分块播放、麦克风
       livevoice/            WebRTC + WS 双工会话
       agent/                编排 loop
-    personas/               人设 YAML
+    personas/               人设 YAML + 角色圣经
     web/live2d/             Haru 查看器 + 官方样本模型
     internal/avatar/        Jev → 表情/动作映射 + WS hub
 

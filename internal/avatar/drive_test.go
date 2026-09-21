@@ -47,23 +47,25 @@ func TestDriveSafetyOverridesJoyFace(t *testing.T) {
 	}
 }
 
-func TestDriveFaceFollowsJevEmotionNotMode(t *testing.T) {
-	anger := &judge.Judgment{Emotion: "anger", Valence: 0.2, Arousal: 0.4, Engagement: 0.5}
-	de := Drive("de_escalate", anger, memory.Affect{})
-	cont := Drive("continue", anger, memory.Affect{})
-	if de.Expression != ExpFrown {
-		t.Fatalf("anger should be frown, got %s", de.Expression)
+func TestDriveFaceFollowsSelfEmotionNotUserMirror(t *testing.T) {
+	j := &judge.Judgment{Emotion: "sadness", SelfEmotion: "anger", Valence: 0.2, Arousal: 0.4, Engagement: 0.5}
+	f := Drive("comfort", j, memory.Affect{})
+	if f.Expression != ExpFrown {
+		t.Fatalf("her own anger should override mirrored sadness, got %s", f.Expression)
 	}
-	if de.Expression != cont.Expression {
-		t.Fatalf("same Jev scores must share a face: de=%s continue=%s", de.Expression, cont.Expression)
+	if f.SelfEmotion != "anger" {
+		t.Fatalf("self emotion not carried: %+v", f)
 	}
-	joyPush := Drive("goal_push", &judge.Judgment{Emotion: "joy", Valence: 0.6, Arousal: 0.4}, memory.Affect{})
-	if joyPush.Expression != ExpBright && joyPush.Expression != ExpPlay {
-		t.Fatalf("joy under goal_push should stay a smile, got %s", joyPush.Expression)
+}
+
+func TestDriveWithRelationshipCarriesScene(t *testing.T) {
+	cue := memory.RelationshipCue{Stage: "熟悉", Summary: "还记着上次没做完的稿子"}
+	f := DriveWithRelationship("goal_push", &judge.Judgment{Emotion: "neutral", SelfEmotion: "joy", Valence: 0.6, Arousal: 0.4}, memory.Affect{}, cue)
+	if f.RelationshipStage != "熟悉" || f.Bond <= 0.1 {
+		t.Fatalf("relationship cue lost: %+v", f)
 	}
-	fear := Drive("continue", &judge.Judgment{Emotion: "fear", Valence: 0.2, Arousal: 0.6}, memory.Affect{})
-	if fear.Expression != ExpWorry {
-		t.Fatalf("fear %s", fear.Expression)
+	if f.Expression != ExpBright && f.Expression != ExpPlay {
+		t.Fatalf("self joy should color the face, got %s", f.Expression)
 	}
 }
 

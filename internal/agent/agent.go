@@ -50,6 +50,7 @@ type Options struct {
 	avatarHub    *avatar.Hub
 	sense        *sense.Bus
 	eyes         *eye.Eyes
+	rel          *memory.RelationshipStore
 }
 
 // Run starts a live voice session and processes turns until ctx is done.
@@ -63,6 +64,13 @@ func Run(ctx context.Context, opt Options) error {
 	mem := memory.New(10)
 	pl := planner.New(p, jevClient, llmClient, opt.PlannerModel)
 	pl.LogFn = func(s string) { opt.log("%s", "[planner] "+s) }
+
+	rel, rerr := memory.NewRelationshipStore(relationshipPath(opt.RunsDir, p.Name))
+	if rerr != nil {
+		opt.log("relationship memory disabled: %v", rerr)
+	} else {
+		opt.rel = rel
+	}
 
 	bus, serr := sense.Open(sense.Options{Root: opt.SenseRoot, RunsDir: opt.RunsDir})
 	if serr != nil {
@@ -91,9 +99,9 @@ func Run(ctx context.Context, opt Options) error {
 			if opt.sense != nil {
 				hub.SetSense(func() any { return opt.sense.Snapshot(p.Name) })
 			}
-			hub.Publish(avatar.Drive("continue", &judge.Judgment{
-				Emotion: "neutral", Engagement: 0.7,
-			}, memory.Affect{Valence: 0.55, Arousal: 0.4, Emotion: "neutral"}))
+			hub.Publish(avatar.DriveWithRelationship("continue", &judge.Judgment{
+				Emotion: "neutral", SelfEmotion: "neutral", Engagement: 0.7,
+			}, memory.Affect{Valence: 0.55, Arousal: 0.4, Emotion: "neutral"}, relCue(opt.rel)))
 		}
 	}
 
@@ -452,8 +460,14 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 				jd.Valence, jd.Arousal, jd.Engagement, jd.SafetyP, jd.PersonaFitP, jd.NeedLLMP, jd.Confidence)
 
 			mode := judge.DecideMode(jd, affect, p.Judge.SafetyThresh, pl.Current())
+			if final && opt.rel != nil {
+				if _, err := opt.rel.ObserveTurn(p.Name, userText, mem.LatestAssistantText(), jd.Emotion, jd.SelfEmotion, mode,
+					jd.Valence, jd.Arousal, jd.Engagement, jd.PersonaFitP); err != nil {
+					opt.log("[relationship] save failed: %v", err)
+				}
+			}
 			if opt.avatarHub != nil {
-				frame := avatar.Drive(mode, jd, affect)
+				frame := avatar.DriveWithRelationship(mode, jd, affect, relCue(opt.rel))
 				opt.avatarHub.Publish(frame)
 				opt.sense.Set(func(l *sense.Live) {
 					l.Expression = frame.Expression
@@ -476,7 +490,7 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 					"engage": jd.Engagement, "early": !final,
 				},
 			})
-			note := steering.Build(p, mode, jd, affect, pl.Current())
+			note := steering.BuildWithScene(p, mode, jd, affect, pl.Current(), sceneCue(opt.rel))
 			ask := sense.ParseAsk(userText)
 			if ask.Kind != "" {
 				opt.sense.Set(func(l *sense.Live) { l.LastAsk = ask.Kind })
@@ -685,6 +699,9 @@ func (o Options) saveLog(mem *memory.Memory, pl *planner.Planner, cause error) e
 		"ended":   time.Now().Format(time.RFC3339),
 		"cause":   causeStr,
 	}
+	if o.rel != nil {
+		payload["relationship"] = o.rel.Snapshot()
+	}
 	if o.sense != nil {
 		payload["sense"] = o.sense.Snapshot("")
 	}
@@ -694,6 +711,56 @@ func (o Options) saveLog(mem *memory.Memory, pl *planner.Planner, cause error) e
 	}
 	o.log("session log: %s", name)
 	return nil
+}
+
+func relationshipPath(dir, personaName string) string {
+	if strings.TrimSpace(dir) == "" {
+		dir = "runs"
+	}
+	return filepath.Join(dir, "relationship-"+slugify(personaName)+".json")
+}
+
+func relCue(store *memory.RelationshipStore) memory.RelationshipCue {
+	if store == nil {
+		return memory.RelationshipCue{}
+	}
+	return store.Cue()
+}
+
+func sceneCue(store *memory.RelationshipStore) steering.SceneCue {
+	if store == nil {
+		return steering.SceneCue{}
+	}
+	c := store.Cue()
+	return steering.SceneCue{
+		Stage:        c.Stage,
+		Summary:      c.Summary,
+		OpenLoops:    append([]string(nil), c.OpenLoops...),
+		SharedEvents: append([]string(nil), c.SharedEvents...),
+	}
+}
+
+func slugify(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+			continue
+		}
+		if r == ' ' {
+			b.WriteByte('-')
+			continue
+		}
+		if r > 127 {
+			b.WriteString(fmt.Sprintf("-%x", r))
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "persona"
+	}
+	return out
 }
 
 func (o Options) log(format string, args ...any) {

@@ -79,6 +79,10 @@ func TestLoadShippedPersonas(t *testing.T) {
 	if !strings.Contains(haru.BaseInstructions(), "我才没有在担心你") {
 		t.Fatalf("examples should land in base instructions: %q", haru.BaseInstructions())
 	}
+	if !strings.Contains(haru.BaseInstructions(), "未完成事项管理员") ||
+		!strings.Contains(haru.BaseInstructions(), "把对方的事真的放在心上") {
+		t.Fatalf("haru needs her character bible in instructions: %q", haru.BaseInstructions())
+	}
 	asuka, err := Load("../../personas/asuka.yaml")
 	if err != nil {
 		t.Fatal(err)

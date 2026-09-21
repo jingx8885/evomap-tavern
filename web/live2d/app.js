@@ -10,26 +10,23 @@
     "safety",
   ];
   const DEMO = {
-    continue: { emotion: "neutral", valence: 0.5, arousal: 0.4, engagement: 0.6 },
-    comfort: { emotion: "sadness", valence: 0.2, arousal: 0.3, engagement: 0.8 },
-    de_escalate: { emotion: "anger", valence: 0.3, arousal: 0.7, engagement: 0.7 },
-    celebrate: { emotion: "joy", valence: 0.9, arousal: 0.8, engagement: 0.9 },
-    re_engage: { emotion: "neutral", valence: 0.5, arousal: 0.4, engagement: 0.15 },
-    goal_push: { emotion: "neutral", valence: 0.65, arousal: 0.55, engagement: 0.8 },
-    safety: { emotion: "fear", valence: 0.15, arousal: 0.6, engagement: 0.5, safety_p: 0.9 },
+    continue: { emotion: "neutral", self_emotion: "neutral", valence: 0.5, arousal: 0.4, engagement: 0.6, relationship_stage: "熟悉" },
+    comfort: { emotion: "sadness", self_emotion: "anger", valence: 0.2, arousal: 0.3, engagement: 0.8, relationship_stage: "信任" },
+    de_escalate: { emotion: "anger", self_emotion: "fear", valence: 0.3, arousal: 0.7, engagement: 0.7, relationship_stage: "熟悉" },
+    celebrate: { emotion: "joy", self_emotion: "joy", valence: 0.9, arousal: 0.8, engagement: 0.9, relationship_stage: "亲密" },
+    re_engage: { emotion: "neutral", self_emotion: "sadness", valence: 0.5, arousal: 0.4, engagement: 0.15, relationship_stage: "熟悉" },
+    goal_push: { emotion: "neutral", self_emotion: "disgust", valence: 0.65, arousal: 0.55, engagement: 0.8, relationship_stage: "熟悉" },
+    safety: { emotion: "fear", self_emotion: "fear", valence: 0.15, arousal: 0.6, engagement: 0.5, safety_p: 0.9, relationship_stage: "信任" },
   };
   const MOUTH_IDS = ["ParamMouthOpenY", "ParamA", "ParamI", "ParamU", "ParamE", "ParamO"];
 
   const statusEl = document.getElementById("status");
   const connEl = document.getElementById("conn");
   const hud = {
-    mode: document.getElementById("mode"),
-    emotion: document.getElementById("emotion"),
-    expression: document.getElementById("expression"),
-    valence: document.getElementById("valence"),
-    arousal: document.getElementById("arousal"),
-    engagement: document.getElementById("engagement"),
-    needLlm: document.getElementById("need-llm"),
+    relationship: document.getElementById("relationship"),
+    selfEmotion: document.getElementById("self-emotion"),
+    doing: document.getElementById("doing"),
+    scene: document.getElementById("scene"),
     mouth: document.getElementById("mouth"),
     self: document.getElementById("self"),
     eye: document.getElementById("eye"),
@@ -163,13 +160,22 @@
   }
 
   function renderHud(frame) {
-    hud.mode.textContent = frame.mode || "—";
-    hud.emotion.textContent = frame.emotion || "—";
-    hud.expression.textContent = frame.expression || "—";
-    hud.valence.textContent = fmt(frame.valence);
-    hud.arousal.textContent = fmt(frame.arousal);
-    hud.engagement.textContent = fmt(frame.engagement);
-    if (hud.needLlm) hud.needLlm.textContent = fmt(frame.need_llm);
+    if (hud.relationship) {
+      hud.relationship.textContent = frame.relationship_stage || "刚认识";
+    }
+    if (hud.selfEmotion) {
+      hud.selfEmotion.textContent = frame.self_emotion || frame.emotion || "—";
+    }
+    if (hud.doing) {
+      hud.doing.textContent = frame.mode === "goal_push" ? "翻小账本催进度" :
+        frame.mode === "comfort" ? "嘴硬地陪着你" :
+        frame.mode === "celebrate" ? "别扭地替你高兴" :
+        frame.mode === "de_escalate" ? "把火气压回去" :
+        frame.mode === "re_engage" ? "把话接回来" : "听你说话";
+    }
+    if (hud.scene) {
+      hud.scene.textContent = frame.relationship_stage || frame.expression || "桌面边";
+    }
     for (const btn of document.querySelectorAll("#modes button")) {
       btn.classList.toggle("active", btn.dataset.mode === frame.mode);
     }
@@ -252,7 +258,7 @@
     const x = w * (0.5 + (look - 0.5) * 0.35);
     const y = h * (0.28 + (1 - look) * 0.12);
     model.focus(x, y);
-    setStatus(`mode ${frame.mode} · ${frame.expression}`);
+    setStatus(`${frame.relationship_stage || "现在"} · ${frame.self_emotion || frame.emotion || "听着"}`);
   }
 
   function layoutModel() {

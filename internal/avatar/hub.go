@@ -201,18 +201,23 @@ func (h *Hub) serveDrive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	j := &judge.Judgment{
-		UserText:   in.UserText,
-		Valence:    in.Valence,
-		Arousal:    in.Arousal,
-		Emotion:    in.Emotion,
-		Engagement: in.Engagement,
-		SafetyP:    in.SafetyP,
-		NeedLLMP:   in.NeedLLM,
+		UserText:    in.UserText,
+		Valence:     in.Valence,
+		Arousal:     in.Arousal,
+		Emotion:     in.Emotion,
+		SelfEmotion: in.SelfEmotion,
+		Engagement:  in.Engagement,
+		SafetyP:     in.SafetyP,
+		NeedLLMP:    in.NeedLLM,
 	}
 	if j.Emotion == "" {
 		j.Emotion = "neutral"
 	}
 	f := Drive(in.Mode, j, memory.Affect{Valence: in.Valence, Arousal: in.Arousal, Emotion: j.Emotion})
+	if in.RelationshipStage != "" {
+		f.RelationshipStage = in.RelationshipStage
+		f.Bond = in.Bond
+	}
 	if in.Expression != "" {
 		f.Expression = in.Expression
 	}

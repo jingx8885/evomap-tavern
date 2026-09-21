@@ -32,6 +32,21 @@ type SenseConfig struct {
 	Eyes    bool `yaml:"eyes"`
 }
 
+// CharacterProfile is the IP-facing character bible. It gives the role a
+// stable want/fear/world so she feels like a character, not a skin.
+type CharacterProfile struct {
+	Hook       string   `yaml:"hook"`
+	Want       string   `yaml:"want"`
+	Fear       string   `yaml:"fear"`
+	Flaw       string   `yaml:"flaw"`
+	Tone       string   `yaml:"tone"`
+	Rituals    []string `yaml:"rituals"`
+	Belongings []string `yaml:"belongings"`
+	Worldview  []string `yaml:"worldview"`
+	Boundaries []string `yaml:"boundaries"`
+	Arc        string   `yaml:"arc"`
+}
+
 // Persona is a pluggable persona.
 type Persona struct {
 	Name         string            `yaml:"name"`
@@ -44,6 +59,7 @@ type Persona struct {
 	Catchphrases []string          `yaml:"catchphrases"`
 	Examples     []string          `yaml:"examples"`
 	Reactions    map[string]string `yaml:"reactions"`
+	Character    CharacterProfile  `yaml:"character"`
 	Judge        JudgeConfig       `yaml:"judge"`
 	Planner      PlannerConfig     `yaml:"planner"`
 	Sense        SenseConfig       `yaml:"sense"`
@@ -91,12 +107,15 @@ func (p *Persona) BaseInstructions() string {
 	if p.Background != "" {
 		fmt.Fprintf(&b, "Background: %s. ", p.Background)
 	}
+	if core := p.CharacterDirective(); core != "" {
+		b.WriteString(core)
+	}
 	if len(p.Taboos) > 0 {
 		fmt.Fprintf(&b, "Never: %s. ", strings.Join(p.Taboos, "; "))
 	}
 	b.WriteString(p.CatchphraseDirective())
 	b.WriteString(p.ExampleDirective())
-	b.WriteString("Wait for the user to speak first. Do not greet, introduce yourself, or repeat your name unless asked. Follow the latest steering mode for how to talk, but mode is not a personality transplant. ")
+	b.WriteString("Wait for the user to speak first. Do not greet, introduce yourself, or repeat your name unless asked. Follow the latest scene note for how to talk, but the scene is not a personality transplant. ")
 	if p.Sense.Enabled {
 		b.WriteString("You have a body you can feel: your voice, your Live2D face, your mood, and the source files that make you. Do not announce this. If asked, answer from that sensation in your own words, without reciting source or sounding like a manual. ")
 		if p.Sense.Eyes {
@@ -104,6 +123,47 @@ func (p *Persona) BaseInstructions() string {
 		}
 	}
 	b.WriteString("Respond conversationally in the user's language; keep replies short enough for voice.")
+	return b.String()
+}
+
+// CharacterDirective compresses the character bible into session instructions.
+// It stays descriptive: exact turn behavior still comes from steering.
+func (p *Persona) CharacterDirective() string {
+	if p == nil {
+		return ""
+	}
+	c := p.Character
+	var b strings.Builder
+	if c.Hook != "" {
+		fmt.Fprintf(&b, "Core role: %s. ", c.Hook)
+	}
+	if c.Want != "" {
+		fmt.Fprintf(&b, "You want: %s. ", c.Want)
+	}
+	if c.Fear != "" {
+		fmt.Fprintf(&b, "You fear: %s. ", c.Fear)
+	}
+	if c.Flaw != "" {
+		fmt.Fprintf(&b, "Your flaw: %s. ", c.Flaw)
+	}
+	if c.Tone != "" {
+		fmt.Fprintf(&b, "Voice texture: %s. ", c.Tone)
+	}
+	if len(c.Rituals) > 0 {
+		fmt.Fprintf(&b, "Your recurring habits: %s. ", strings.Join(c.Rituals, "; "))
+	}
+	if len(c.Belongings) > 0 {
+		fmt.Fprintf(&b, "Signature belongings: %s. ", strings.Join(c.Belongings, "; "))
+	}
+	if len(c.Worldview) > 0 {
+		fmt.Fprintf(&b, "You believe: %s. ", strings.Join(c.Worldview, "; "))
+	}
+	if len(c.Boundaries) > 0 {
+		fmt.Fprintf(&b, "Boundaries: %s. ", strings.Join(c.Boundaries, "; "))
+	}
+	if c.Arc != "" {
+		fmt.Fprintf(&b, "Long-term arc: %s. ", c.Arc)
+	}
 	return b.String()
 }
 

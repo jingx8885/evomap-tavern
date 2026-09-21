@@ -11,6 +11,14 @@ import (
 	"github.com/jingx8885/lov-evo/internal/persona"
 )
 
+// SceneCue is the relationship/context slice the voice model may use this turn.
+type SceneCue struct {
+	Stage        string
+	Summary      string
+	OpenLoops    []string
+	SharedEvents []string
+}
+
 func fallbackDirective(mode string) string {
 	switch mode {
 	case "safety":
@@ -47,40 +55,82 @@ func modeDirective(p *persona.Persona, mode string) string {
 	return fallbackDirective(mode)
 }
 
+func cueDirective(cue SceneCue) string {
+	if cue.Stage == "" && cue.Summary == "" && len(cue.OpenLoops) == 0 && len(cue.SharedEvents) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Relationship scene: ")
+	if cue.Stage != "" {
+		fmt.Fprintf(&b, "stage=%s. ", cue.Stage)
+	}
+	if cue.Summary != "" {
+		fmt.Fprintf(&b, "%s. ", cue.Summary)
+	}
+	if len(cue.OpenLoops) > 0 {
+		fmt.Fprintf(&b, "Open loops you can revisit naturally: %s. ", strings.Join(tailStrings(cue.OpenLoops, 2), " / "))
+	}
+	if len(cue.SharedEvents) > 0 {
+		fmt.Fprintf(&b, "Shared events you can recall: %s. ", strings.Join(tailStrings(cue.SharedEvents, 2), " / "))
+	}
+	b.WriteString("Use this like memory, not a database dump. Do not read it aloud unless it fits the turn.")
+	return b.String()
+}
+
 // Build composes the next session instructions.
 func Build(p *persona.Persona, mode string, j *judge.Judgment,
 	a memory.Affect, planNote string) string {
+	return BuildWithScene(p, mode, j, a, planNote, SceneCue{})
+}
+
+// BuildWithScene is the character-facing steering note: short, current-scene,
+// and centered on her own emotion rather than the user's emotion alone.
+func BuildWithScene(p *persona.Persona, mode string, j *judge.Judgment,
+	a memory.Affect, planNote string, cue SceneCue) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Stay in character as %s. ", p.Name)
 	if p.Style != "" {
 		fmt.Fprintf(&b, "Style: %s. ", p.Style)
+	}
+	if core := p.CharacterDirective(); core != "" {
+		b.WriteString(core)
 	}
 	if len(p.Taboos) > 0 {
 		fmt.Fprintf(&b, "Never: %s. ", strings.Join(p.Taboos, "; "))
 	}
 	b.WriteString(p.CatchphraseDirective())
 	b.WriteString(p.ExampleDirective())
-	b.WriteString("Mode changes how you handle this turn, not who you are. ")
-	fmt.Fprintf(&b, "Mode: %s - %s ", mode, modeDirective(p, mode))
+	b.WriteString("Scene changes how you handle this turn, not who you are. ")
+	fmt.Fprintf(&b, "Scene: %s - %s ", mode, modeDirective(p, mode))
+	if j != nil && j.SelfEmotion != "" {
+		fmt.Fprintf(&b, "Her own feeling this turn: %s. Let it color the reply without naming the label. ",
+			j.SelfEmotion)
+	}
 	fmt.Fprintf(&b, "User state: emotion=%s valence=%.2f arousal=%.2f engagement=%.2f",
 		j.Emotion, a.Valence, a.Arousal, j.Engagement)
-	if j.Intent != "" {
+	if j != nil && j.Intent != "" {
 		fmt.Fprintf(&b, " intent=%s", j.Intent)
 	}
 	b.WriteString(". ")
-	if j.SelfEmotion != "" {
-		fmt.Fprintf(&b, "Your own feeling this turn: %s. Let it color the reply without naming the label. ",
-			j.SelfEmotion)
+	if cueText := cueDirective(cue); cueText != "" {
+		b.WriteString(cueText + " ")
 	}
 	if planNote != "" && mode != "de_escalate" && mode != "comfort" && mode != "safety" {
-		fmt.Fprintf(&b, "Goal guidance: %s ", planNote)
+		fmt.Fprintf(&b, "Long-term thread: %s ", planNote)
 	}
-	if j.OffPersona(p.Judge.FitThresh) {
+	if j != nil && j.OffPersona(p.Judge.FitThresh) {
 		b.WriteString("Your last reply drifted off this persona. Snap back to Style and the reaction above without announcing it. ")
 	}
-	b.WriteString("Show Mode in your voice on this turn, not later. ")
+	b.WriteString("Show this scene in your voice on this turn, not later. ")
 	b.WriteString("Do not greet, re-introduce yourself, or say your name. ")
-	b.WriteString("Do not read labels aloud (Mode, User state, Goal, 名字). ")
+	b.WriteString("Do not read labels aloud (Scene, User state, Relationship, 名字). ")
 	b.WriteString("Reply in the user's language; keep it short enough for voice.")
 	return b.String()
+}
+
+func tailStrings(list []string, n int) []string {
+	if n <= 0 || len(list) <= n {
+		return append([]string(nil), list...)
+	}
+	return append([]string(nil), list[len(list)-n:]...)
 }
