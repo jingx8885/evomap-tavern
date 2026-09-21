@@ -1,8 +1,12 @@
 package livevoice
 
 import (
+	"encoding/binary"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jingx8885/lov-evo/internal/audio"
 )
 
 func TestApplyTranscriptDeltas(t *testing.T) {
@@ -95,5 +99,38 @@ func TestIsTranscriptEvent(t *testing.T) {
 	}
 	if isTranscriptEvent("session.input_audio.append") {
 		t.Fatal("audio append is not transcript")
+	}
+}
+
+func TestPlayGateHangoverKeepsIntraSpeechGaps(t *testing.T) {
+	var g playGate
+	speech := audio.TonePCM(440, 0.02)
+	silence := make([]byte, len(speech))
+	if g.Allow(silence) {
+		t.Fatal("silence before speech should stay gated off")
+	}
+	if !g.Allow(speech) {
+		t.Fatal("speech should open the gate")
+	}
+	if !g.Allow(silence) {
+		t.Fatal("immediate silence after speech should still play")
+	}
+	time.Sleep(playHangover + 40*time.Millisecond)
+	if g.Allow(silence) {
+		t.Fatal("comfort noise after hangover should stay off")
+	}
+}
+
+func TestPlayGateOpensOnLeadingSpeech(t *testing.T) {
+	var g playGate
+	pcm := make([]byte, (480+240)*2)
+	for i := 0; i < 240; i++ {
+		binary.LittleEndian.PutUint16(pcm[i*2:], uint16(int16(22000)))
+	}
+	if audio.MouthOpen(pcm) != 0 {
+		t.Fatal("setup: trailing window is quiet")
+	}
+	if !g.Allow(pcm) {
+		t.Fatal("chunk that starts with speech must play")
 	}
 }

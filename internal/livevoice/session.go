@@ -91,6 +91,7 @@ type Session struct {
 	skipMic       bool
 	offerAudio    string
 	answerAudio   string
+	playGate      playGate
 
 	Verbose bool
 }
@@ -162,6 +163,9 @@ func connect(ctx context.Context, baseURL, apiKey, instructions, voice string, s
 	})
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
 		fmt.Printf("[livevoice] pc %s\n", st)
+		if st == webrtc.PeerConnectionStateFailed {
+			s.emit(Event{Kind: EventClosed, Err: fmt.Errorf("peer connection failed")})
+		}
 	})
 	pc.OnTrack(func(tr *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		go func() {
@@ -301,6 +305,23 @@ func (s *Session) postCall(sdp, instructions string) (callID, answer string, err
 // the continuous downlink timeline. A low threshold latches ducking and
 // the gateway only ever hears silence.
 const duckMouthMin = 0.18
+
+// playHangover keeps speakers open through short intra-speech gaps so
+// dropping comfort-noise padding does not glue syllables together.
+const playHangover = 320 * time.Millisecond
+
+type playGate struct {
+	until time.Time
+}
+
+// Allow is true while pcm looks like speech, and for playHangover after.
+func (g *playGate) Allow(pcm []byte) bool {
+	if audio.ChunkHasVoice(pcm) {
+		g.until = time.Now().Add(playHangover)
+		return true
+	}
+	return !g.until.IsZero() && time.Now().Before(g.until)
+}
 
 // uplink streams PCMU frames at 20ms cadence: mic frames when available,
 // silence otherwise (the gateway needs active RTP to play speakable text).
@@ -484,9 +505,11 @@ func (s *Session) handleEvent(data []byte) {
 			s.duckMicUntil.Store(time.Now().Add(400 * time.Millisecond).UnixNano())
 		}
 		// Comfort-noise padding is a continuous timeline; playing it
-		// leaks into the mic, VAD never ends, and the model never replies.
-		if s.player != nil && mouth > 0 {
+		// leaks into the mic. Dropping every quiet delta though chops
+		// syllables (MouthOpen only sees the last 20ms). Gate with hangover.
+		if s.player != nil && s.playGate.Allow(pcm) {
 			s.player.WritePCM(pcm)
+			s.duckMicUntil.Store(time.Now().Add(400 * time.Millisecond).UnixNano())
 		}
 		s.onPCMMu.Lock()
 		fn := s.onPCM
@@ -791,6 +814,17 @@ func (s *Session) logf(format string, args ...any) {
 }
 
 func (s *Session) emit(ev Event) {
+	if s.events == nil {
+		return
+	}
+	// Closed/error must not be dropped: the agent reconnects on them.
+	if ev.Kind == EventClosed || ev.Kind == EventError {
+		select {
+		case s.events <- ev:
+		case <-time.After(time.Second):
+		}
+		return
+	}
 	select {
 	case s.events <- ev:
 	default:

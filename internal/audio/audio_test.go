@@ -92,6 +92,19 @@ func TestMouthOpenUsesLastWindow(t *testing.T) {
 	}
 }
 
+func TestChunkHasVoiceLeadingSpeech(t *testing.T) {
+	pcm := make([]byte, (mouthWindow+240)*2)
+	for i := 0; i < 240; i++ {
+		binary.LittleEndian.PutUint16(pcm[i*2:], uint16(int16(22000)))
+	}
+	if !ChunkHasVoice(pcm) {
+		t.Fatal("leading speech should still count as voice for playback")
+	}
+	if ChunkHasVoice(make([]byte, mouthWindow*4)) {
+		t.Fatal("silence is not voice")
+	}
+}
+
 func TestMouthEnvelope(t *testing.T) {
 	if MouthEnvelope(1.5) != 0 {
 		t.Fatal("expected pause")

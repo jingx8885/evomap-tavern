@@ -72,56 +72,112 @@ func Run(ctx context.Context, opt Options) error {
 		}
 	}
 
-	sess, err := livevoice.Connect(ctx, opt.BaseURL, opt.APIKey,
-		p.BaseInstructions(), p.Voice)
-	if err != nil {
-		return err
-	}
-	sess.Verbose = opt.Verbose
-	defer sess.Close()
-	if opt.avatarHub != nil {
-		sess.OnPCM(func(pcm []byte) {
-			// Mouth only: local winmm already plays this PCM. Sending it
-			// to the viewer made the browser play a second copy (echo).
-			opt.avatarHub.Mouth(audio.MouthOpen(pcm))
-		})
-	}
-
-	wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	if err := sess.WaitStarted(wctx); err != nil {
-		cancel()
-		return fmt.Errorf("session did not start: %w", err)
-	}
-	cancel()
-	opt.log("session started; persona=%s voice=%s", p.Name, p.Voice)
-
-	if opt.Greeting && p.Greeting != "" {
-		if err := sess.Speak(p.Greeting); err != nil {
-			opt.log("greeting failed: %v", err)
-		}
-	}
-	if s := strings.TrimSpace(opt.Say); s != "" {
-		if err := sess.Speak(s); err != nil {
-			opt.log("say failed: %v", err)
-		} else {
-			opt.log("say: %s", s)
-		}
-	}
-
 	cmds := make(chan string, 16)
 	go readStdin(ctx, cmds)
 	opt.log("commands: /say <text> (speak) /steer <text> (reinstruct) " +
 		"/goal <text> (plan) /status /quit")
 
+	first := true
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return opt.saveLog(mem, pl, lastErr)
+		}
+		sess, err := livevoice.Connect(ctx, opt.BaseURL, opt.APIKey,
+			p.BaseInstructions(), p.Voice)
+		if err != nil {
+			lastErr = err
+			opt.log("voice connect failed: %v; retry in 2s", err)
+			select {
+			case <-ctx.Done():
+				return opt.saveLog(mem, pl, err)
+			case <-time.After(2 * time.Second):
+			}
+			continue
+		}
+		sess.Verbose = opt.Verbose
+		if opt.avatarHub != nil {
+			sess.OnPCM(func(pcm []byte) {
+				// Mouth only: local winmm already plays this PCM. Sending it
+				// to the viewer made the browser play a second copy (echo).
+				opt.avatarHub.Mouth(audio.MouthOpen(pcm))
+			})
+		}
+
+		wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err = sess.WaitStarted(wctx)
+		cancel()
+		if err != nil {
+			sess.Close()
+			lastErr = err
+			opt.log("session did not start: %v; retry in 2s", err)
+			select {
+			case <-ctx.Done():
+				return opt.saveLog(mem, pl, err)
+			case <-time.After(2 * time.Second):
+			}
+			continue
+		}
+		opt.log("session started; persona=%s voice=%s", p.Name, p.Voice)
+
+		if first {
+			if opt.Greeting && p.Greeting != "" {
+				if err := sess.Speak(p.Greeting); err != nil {
+					opt.log("greeting failed: %v", err)
+				}
+			}
+			if s := strings.TrimSpace(opt.Say); s != "" {
+				if err := sess.Speak(s); err != nil {
+					opt.log("say failed: %v", err)
+				} else {
+					opt.log("say: %s", s)
+				}
+			}
+			first = false
+		}
+
+		res := pumpSession(ctx, opt, p, jevClient, mem, pl, sess, cmds)
+		sess.Close()
+		switch res.kind {
+		case pumpQuit, pumpCancel:
+			return opt.saveLog(mem, pl, res.err)
+		default:
+			lastErr = res.err
+			opt.log("voice session dropped: %v; reconnecting in 2s", res.err)
+			select {
+			case <-ctx.Done():
+				return opt.saveLog(mem, pl, res.err)
+			case <-time.After(2 * time.Second):
+			}
+		}
+	}
+}
+
+type pumpKind int
+
+const (
+	pumpDrop pumpKind = iota
+	pumpQuit
+	pumpCancel
+)
+
+type pumpResult struct {
+	kind pumpKind
+	err  error
+}
+
+func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
+	jevClient *jev.Client, mem *memory.Memory, pl *planner.Planner,
+	sess *livevoice.Session, cmds <-chan string) pumpResult {
 	var lastTurnKey string
 	var lastTurnAt time.Time
 	for {
 		select {
 		case <-ctx.Done():
-			return opt.saveLog(mem, pl, nil)
+			return pumpResult{kind: pumpCancel, err: ctx.Err()}
 		case ev, ok := <-sess.Events():
 			if !ok {
-				return opt.saveLog(mem, pl, nil)
+				return pumpResult{kind: pumpDrop, err: fmt.Errorf("events closed")}
 			}
 			switch ev.Kind {
 			case livevoice.EventTurnDone:
@@ -150,11 +206,11 @@ func Run(ctx context.Context, opt Options) error {
 				opt.log("[voice error] %v", ev.Err)
 			case livevoice.EventClosed:
 				opt.log("session closed: %v", ev.Err)
-				return opt.saveLog(mem, pl, ev.Err)
+				return pumpResult{kind: pumpDrop, err: ev.Err}
 			}
 		case line := <-cmds:
 			if handleCommand(line, p, pl, sess, opt) {
-				return opt.saveLog(mem, pl, nil)
+				return pumpResult{kind: pumpQuit}
 			}
 		}
 	}

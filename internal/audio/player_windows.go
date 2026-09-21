@@ -18,7 +18,8 @@ const (
 	whdrDone        = 0x00000001
 	mmsyserrNoErr   = 0
 	winmmFrameBytes = DownlinkRate * 2 / 50 // 20ms of s16le mono
-	winmmOutBufs    = 8
+	winmmOutBufs    = 12
+	winmmPrimeBytes = winmmFrameBytes * 5 // ~100ms before the device starts
 )
 
 type waveFormatEx struct {
@@ -154,7 +155,12 @@ func winmmLoop(hwo uintptr, in <-chan []byte, stop <-chan struct{}) {
 	defer tick.Stop()
 	for {
 		winmmRecycle(hwo, bufs)
-		if !primed && len(acc) >= winmmFrameBytes*3 {
+		// After an utterance the device drains. Starting the next one
+		// from a single 20ms buffer underruns immediately (stutter).
+		if primed && len(acc) < winmmFrameBytes && !winmmAnyBusy(bufs) {
+			primed = false
+		}
+		if !primed && len(acc) >= winmmPrimeBytes {
 			primed = true
 		}
 		if primed {
@@ -173,6 +179,15 @@ func winmmLoop(hwo uintptr, in <-chan []byte, stop <-chan struct{}) {
 		case <-tick.C:
 		}
 	}
+}
+
+func winmmAnyBusy(bufs []winmmOutBuf) bool {
+	for i := range bufs {
+		if bufs[i].busy {
+			return true
+		}
+	}
+	return false
 }
 
 func winmmRecycle(hwo uintptr, bufs []winmmOutBuf) {

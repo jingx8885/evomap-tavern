@@ -508,6 +508,30 @@ func MouthOpen(pcm []byte) float64 {
 	return math.Sqrt(v)
 }
 
+const mouthFrameBytes = mouthWindow * 2
+
+// ChunkHasVoice reports whether any 20ms window in pcm looks like speech.
+// MouthOpen only inspects the trailing window (for lip sync); using that
+// to gate speakers drops a whole delta that ends in a quiet tail.
+func ChunkHasVoice(pcm []byte) bool {
+	if len(pcm) < 2 {
+		return false
+	}
+	if len(pcm) <= mouthFrameBytes {
+		return MouthOpen(pcm) > 0
+	}
+	for off := 0; off < len(pcm); off += mouthFrameBytes {
+		end := off + mouthFrameBytes
+		if end > len(pcm) {
+			end = len(pcm)
+		}
+		if MouthOpen(pcm[off:end]) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // MouthEnvelope is a synthetic speak/pause curve for --lipsync demos.
 // Period is 2.4s: ~0.9s of syllables then rest.
 func MouthEnvelope(t float64) float64 {
