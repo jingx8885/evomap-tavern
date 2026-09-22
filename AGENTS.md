@@ -29,11 +29,11 @@ lov-evo 是人格语音机器人。同一条会话里同时跑三个模型，职
                               │
               ┌───────────────┼───────────────┐
               ▼               ▼               ▼
-         steering.Build    avatar.Drive    need_llm 过阈值？
-         developer 静默注入  Live2D 脸        │
-              │                              ▼ 异步、不挡语音
-              ▼                         LLM chat.completions
-         gpt-live 继续说                复查 / 出题 / 长思考
+         steering.Build    avatar.Drive    act 总入口（一个）
+         developer 静默注入  Live2D 脸     plan / computer_use / camera / screen / look
+              │                              │
+              ▼                              ▼ 异步、不挡语音
+         gpt-live 继续说                Go 执行；plan 才调慢 LLM
                                         commentary 才允许开口 nudge
 ```
 
@@ -56,7 +56,8 @@ Jev 是 System One。一次请求 = 一份 `state` + 一组 typed `questions`，
 | valence / arousal | score | 用户情绪极性与能量 |
 | emotion | choice | joy/sadness/anger/fear/surprise/disgust/neutral/other |
 | engagement | score | 还在聊还是在抽离 |
-| need_llm | noul | 这一轮要不要花一次慢 LLM |
+| need_llm | noul | 慢思考有多需要。`act` 缺省时才用它回退到 plan |
+| act | choice | 总入口：none / plan / computer_use / camera / screen / look。一轮只启动一个。`camera` 只看镜头，`screen` 只看电脑窗口，两件分开 |
 | safety | noul | 可选；过阈值进 `safety` 模式 |
 | persona_fit | noul | 可选；助手上一句是否贴人设 |
 
@@ -127,11 +128,11 @@ LLM 输出约定：planner / desk 文本都走严格 JSON（`note` 或 `text`）
 `agent.processTurn`（`turn.done` 为 final；部分 transcript 为 early）：
 
 1. 用户/助手文本进 `memory`（最近 N 轮 + valence/arousal EMA，safety sticky）。
-2. `judge.JudgeTurn` 一次 Jev：情感 / 投入 / 安全 / 人设贴合 / **要不要 LLM**。
+2. `judge.JudgeTurn` 一次 Jev：情感 / 投入 / 安全 / 人设贴合 / **`act` 总入口**。`need_llm` 仍在同一次请求里，只给 plan 的强度。
 3. `judge.DecideMode` 选 mode；`steering.Build` 拼 guidance；可选叠 `sense.Felt`。
 4. `sess.Steer` → developer。同一帧 `avatar.Drive` 把 **steering mode + 本轮情感** 映射成 Haru 表情，不把用户的脸当输入。
-5. 仅 final：`planner.Consider(need_llm)`。过门控则异步 LLM refine；新 note 才 commentary nudge。
-6. 工具不在这条热路径上。`/desk`、`/codex`、`/look` 另起 goroutine 或命令处理，结果最多变成 steer 文本，不让双工自己去点鼠标。
+5. 仅 final，且本轮判断成功：按 `act` 打开一条支线。支线一旦打开就留住，后面的话折进同一条目标，对话继续，工作也继续。同一条支线里再问 `branch_done`；只有这题过阈值才收束。没完成时，后一轮即使 `act=none` 也不换线。`computer_use` / `codex` 的每一步操作仍由内层 Jev 选，完成不由内层宣布。`safety` 或刚打开时置信度过低则不动手。同一时间只跑一个动手任务。
+6. `/desk`、`/codex`、`/look` 仍是操作者手动入口。`/codex` 会跳过外层 Jev。语音热路径不走这条。
 
 ---
 
@@ -147,6 +148,8 @@ LLM 输出约定：planner / desk 文本都走严格 JSON（`note` 或 `text`）
 | `/steer <文本>` | 手写本轮行为指令 | 双工 developer |
 | `/goal <文本>` | 手动覆盖长期目标 | planner note，source=`manual` |
 | `/look <文件>` | 读允许名单内的源码，再 steer 体感 | sense + developer |
+| `/camera` | 只看摄像头这一帧 | eye + developer |
+| `/screen` | 只看电脑窗口（computer-use，不是截图像素） | eye + developer |
 | `/sense` | 打印自我快照，并按“身体”提问注入体感 | sense + developer |
 | `/desk <目标>` | Jev 驱动的本机电脑使用 | Jev 选题 → LLM 必要时写文本 → Go 执行 |
 | `/codex <目标>` | 跳过 Jev，Codex CLI + `gpt-5.6-luna` | 慢 LLM 直接改仓库 |

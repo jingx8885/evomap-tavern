@@ -776,10 +776,14 @@ func (s *Session) Speak(text string) error {
 // confirmed by the gateway contract is "speakable" (verbatim TTS);
 // other channels are experimental - see the ctxprobe command.
 func (s *Session) AppendContext(channel, text string) error {
+	fitted := FitHead(text)
+	if fitted != strings.TrimSpace(text) {
+		s.logf("context append clipped channel=%s tokens~%d", channel, estimateTokens(fitted))
+	}
 	return s.sendJSON(map[string]any{
 		"type":    "session.context.append",
 		"channel": channel,
-		"content": []map[string]string{{"type": "input_text", "text": text}},
+		"content": []map[string]string{{"type": "input_text", "text": fitted}},
 	})
 }
 

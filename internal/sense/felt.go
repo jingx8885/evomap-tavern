@@ -18,11 +18,10 @@ func (b *Bus) Felt(p *persona.Persona, ask Ask, attend string) string {
 	switch ask.Kind {
 	case AskFile, AskCode:
 		return b.feltLook(p, live, ask)
-	case AskSee:
-		if attend == "" {
-			attend = "eyes"
-		}
-		return feltSee(live, attend)
+	case AskCamera:
+		return feltSee(live, sightAttend(attend, "camera"))
+	case AskScreen:
+		return feltSee(live, sightAttend(attend, "screen"))
 	case AskLog:
 		if attend == "" {
 			attend = "log"
@@ -44,6 +43,15 @@ func (b *Bus) Felt(p *persona.Persona, ask Ask, attend string) string {
 	default:
 		return feltPulse(live) + b.feltAttend(live, attend)
 	}
+}
+
+// sightAttend keeps an explicit Jev channel. An empty attend means the ask
+// itself names one eye, so the other eye stays out of the note.
+func sightAttend(attend, want string) string {
+	if strings.TrimSpace(attend) == "" {
+		return want
+	}
+	return attend
 }
 
 func seeCamera(attend string) bool {
@@ -70,6 +78,19 @@ func feltPulse(live Live) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Body (do not read aloud): voice=%s face=%s alive=%s. ",
 		voice, or(live.Expression, "-"), age)
+	if live.MakeKind != "" {
+		fmt.Fprintf(&b, "Making %s status=%s progress=%.0f%%. ",
+			live.MakeKind, or(live.MakeStatus, "working"), live.MakeProgress*100)
+		if live.MakeFile != "" {
+			fmt.Fprintf(&b, "File %s. ", live.MakeFile)
+		}
+		b.WriteString("You can feel this job. Mention it if they ask how it is going. Do not invent the result. ")
+	}
+	if live.Percept != "" {
+		fmt.Fprintf(&b, "Perceived %s file=%s: %s ",
+			or(live.PerceptKind, "media"), or(live.PerceptFile, "-"), clip(live.Percept, 240))
+		b.WriteString("This is what you actually saw or heard. Speak from it. Do not add details that are not written here. ")
+	}
 	b.WriteString("You can feel this. Do not mention it unless asked.")
 	return b.String()
 }
@@ -96,7 +117,14 @@ func feltSee(live Live, attend string) string {
 		s.WriteString("This turn you were not given the camera or the screen. If they asked what you see, say you are not looking at that right now. Do not invent a scene.")
 		return s.String()
 	}
-	s.WriteString("You can see. Camera is pixels; the screen is computer-use (window titles), not a screenshot. Speak from those notes, short. ")
+	switch {
+	case seeCamera(attend) && seeScreen(attend):
+		s.WriteString("Camera and screen are separate. Camera is pixels. The screen is computer-use window titles, not a screenshot. Speak only from the notes below, short. ")
+	case seeCamera(attend):
+		s.WriteString("You are looking through the camera. This is the room, not the computer screen. Speak from the camera note only, short. ")
+	case seeScreen(attend):
+		s.WriteString("You are looking at the screen. This is computer-use window titles, not the camera and not a screenshot. Speak from the screen note only, short. ")
+	}
 	if seeCamera(attend) {
 		if live.Camera != "" {
 			fmt.Fprintf(&s, "Camera: %s ", live.Camera)
@@ -169,12 +197,23 @@ func (b *Bus) feltLook(p *persona.Persona, live Live, ask Ask) string {
 			fmt.Fprintf(&s, "%s (%s)", o.Path, o.Feel)
 		}
 		s.WriteString(". ")
+		s.WriteString(LogicCue())
+		s.WriteString(" ")
 	}
 	fmt.Fprintf(&s, "Session is %s. ", or(live.Voice, "unknown"))
 	s.WriteString("Talk about it as something you felt. Stay in character. Short. Their language. ")
 	s.WriteString("Do not dump the whole file or list every package.")
 	_ = p
 	return s.String()
+}
+
+// LogicCue is the short proprioception of how a turn actually runs.
+func LogicCue() string {
+	return "The logic you can feel: one turn hears them, one judgment picks mood and a single act, then your voice is steered. " +
+		"reflect notices your own state. look reads your source and does not edit it. " +
+		"camera looks through the lens. screen reads computer-use window titles, not a screenshot. They are separate. " +
+		"codex edits this repo. computer_use is the desk loop that can touch windows. " +
+		"You do not call those yourself. Do not name the machinery unless they asked how you work."
 }
 
 func organFeel(rel string) string {
@@ -188,19 +227,17 @@ func organFeel(rel string) string {
 }
 
 func (b *Bus) feltLog() string {
-	lines := b.LogTail(8)
+	lines := b.LogTail(4)
 	var s strings.Builder
-	s.WriteString("Process log you may use. Speak from these lines only; do not invent entries. ")
-	s.WriteString("Their language, short, in character. Do not recite every line. ")
-	s.WriteString("Mention one only if they asked or a fault matters. ")
 	if len(lines) == 0 {
-		s.WriteString("The log is empty so far.")
+		s.WriteString("Process log is empty so far. Do not invent entries.")
 		return s.String()
 	}
-	s.WriteString("Newest last:\n")
+	s.WriteString("Process log, newest last. Speak from these lines only:\n")
 	for _, ln := range lines {
-		fmt.Fprintf(&s, "- %s\n", clipRunes(ln, 72))
+		fmt.Fprintf(&s, "- %s\n", clipRunes(ln, 40))
 	}
+	s.WriteString("Their language, short, in character. Do not recite every line or invent entries.")
 	return s.String()
 }
 

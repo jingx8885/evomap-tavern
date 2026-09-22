@@ -1,7 +1,8 @@
 // Package judge turns each conversation turn into typed Jev judgments:
-// user affect, intent, the persona's own feeling, steering mode, and fit.
-// Everything is asked in ONE /v1/systemone request. Go only applies the
-// safety latch and falls back if Jev omits a mode.
+// user affect, intent, the persona's own feeling, steering mode, fit,
+// and which capability to start. Everything is asked in ONE /v1/systemone
+// request. That request is the only entry for tools. Go applies the safety
+// latch, drops unknown choices, and falls back if Jev omits a mode.
 package judge
 
 import (
@@ -53,6 +54,33 @@ var DefaultModeCriteria = map[string]string{
 // DefaultNeedLLM is the noul cutoff for launching the planner LLM.
 const DefaultNeedLLM = 0.55
 
+// DefaultActConfidence is the choice confidence below which computer use
+// is refused. A missing confidence does not refuse; an explicit low one does.
+const DefaultActConfidence = 0.30
+
+// DefaultBranchDone is the branch_done noul at which an open branch closes.
+// Below it, the same branch keeps the conversation and the work.
+const DefaultBranchDone = 0.80
+
+// Capability ids. act is the closed set the turn Jev uses to pick one tool.
+const (
+	ActNone        = "none"
+	ActPlan        = "plan"
+	ActReflect     = "reflect"
+	ActLook        = "look"
+	ActCamera      = "camera"
+	ActScreen      = "screen"
+	ActCodex       = "codex"
+	ActComputerUse = "computer_use"
+	ActImage       = "image"
+	ActVideo       = "video"
+	ActSpeech      = "speech"
+	ActSong        = "song"
+	ActPicture     = "picture"
+	ActWatch       = "watch"
+	ActListen      = "listen"
+)
+
 // DefaultFitThresh is the persona_fit noul below which steering snaps back.
 const DefaultFitThresh = 0.45
 
@@ -77,7 +105,22 @@ type Judgment struct {
 	NeedLLMP     float64               `json:"need_llm"`
 	Confidence   float64               `json:"confidence,omitempty"`
 	Attend       string                `json:"attend,omitempty"`
+	Act          string                `json:"act,omitempty"`
+	BranchDoneP  float64               `json:"branch_done,omitempty"`
 	Raw          map[string]jev.Answer `json:"-"`
+}
+
+// Branch is the capability already in progress. Empty Kind means none.
+// The turn Jev sees it and answers branch_done; Go keeps the branch until that says yes.
+type Branch struct {
+	Kind string
+	Goal string
+	Note string
+}
+
+// Open reports whether a real capability is in progress.
+func (b Branch) Open() bool {
+	return knownAct[b.Kind] && b.Kind != ActNone
 }
 
 // Observe is what she could look at this turn. Jev picks a channel;
@@ -135,8 +178,35 @@ var knownAttend = map[string]bool{
 	"none": true, "camera": true, "screen": true, "eyes": true, "log": true, "all": true,
 }
 
+// ActLabels is the only tool entry. One choice, then Go executes.
+// codex edits her own repo. computer_use is the desk loop for the machine.
+var ActLabels = map[string]string{
+	ActNone:        "Just talk. No tool, no desktop action, no extra look.",
+	ActPlan:        "A slower written plan or decision is needed. Not a desktop action.",
+	ActReflect:     "They asked her to notice herself: who she is, whether she can feel her voice, face, or mood, or a fault in her own log. Not a request to read a file, edit code, or use the computer.",
+	ActLook:        "They asked how she is built, what her own code does, or to feel a specific file in her body. Understanding, not editing.",
+	ActCamera:      "They asked her to look through the camera now: at them, the room, or who is there. Not the computer screen, and not a saved picture.",
+	ActScreen:      "They asked her to look at the computer screen now: which window or what is on the desktop. Computer-use window titles, not the camera, and not a saved picture.",
+	ActCodex:       "They want her to change her own source in this repository via Codex. Not a general desktop action, and not merely talking about code.",
+	ActComputerUse: "They want something done on this machine now that is not only editing her own repo: open an app, use a window, type, or act on the desktop. Not mere talk about computers.",
+	ActImage:       "They want a still picture made, or she is being asked to make one (a bouquet, a scene, an icon). Talking about a thing is not enough.",
+	ActVideo:       "They want a short moving clip made. Not a still picture, and not merely describing motion.",
+	ActSpeech:      "They want a separate spoken or voiced audio line made. Not her live voice, and not a song.",
+	ActSong:        "They want a song made with Suno: a melody, a track, or lyrics set to music. Not a spoken line and not a video.",
+	ActPicture:     "They want her to look at a still picture that already exists, usually one she just made. Not a request to generate a new one, and not the live camera.",
+	ActWatch:       "They want her to watch a video that already exists, usually one she just made. Not a request to generate a new clip, and not the live camera.",
+	ActListen:      "They want her to listen to a song or voice recording that already exists. Not a request to compose a new song, and not her live microphone.",
+}
+
+var knownAct = map[string]bool{
+	ActNone: true, ActPlan: true, ActReflect: true, ActLook: true,
+	ActCamera: true, ActScreen: true, ActCodex: true, ActComputerUse: true,
+	ActImage: true, ActVideo: true, ActSpeech: true, ActSong: true,
+	ActPicture: true, ActWatch: true, ActListen: true,
+}
+
 // questions builds the one-shot Jev question set for a turn.
-func questions(p *persona.Persona, withPersonaFit bool, planNote string) map[string]jev.Question {
+func questions(p *persona.Persona, withPersonaFit bool, planNote string, br Branch) map[string]jev.Question {
 	qs := map[string]jev.Question{
 		"valence": {
 			Type: "score",
@@ -214,6 +284,43 @@ func questions(p *persona.Persona, withPersonaFit bool, planNote string) map[str
 				"Do not pick a channel just because a caption exists.",
 			Criteria: criteriaCopy(AttendLabels),
 		},
+		"act": {
+			Type: "choice",
+			Instructions: "Which single capability should the runtime start after this turn? " +
+				"This is the only entry for tools. Pick exactly one. " +
+				"Pick none for ordinary chat, greetings, and backchannels. " +
+				"Pick plan when a slower written decision is needed (a plan, a stuck " +
+				"conversation, something the live voice should not invent alone). " +
+				"Pick reflect when they ask her to notice herself, her mood, or a fault in her log. " +
+				"Pick look when they ask how she is built or what her own code does. Do not edit. " +
+				"Pick camera only when they asked her to look through the camera now. " +
+				"Pick screen only when they asked her to look at the computer screen now. " +
+				"Camera and screen are different capabilities. Do not pick one to answer the other. " +
+				"Pick codex only when they want her to change her own source in this repo. " +
+				"Pick computer_use only when they are asking her to act on this machine " +
+				"now in a way that is not just editing her repo. " +
+				"Talking about code or computers is not codex or computer_use. " +
+				"Pick image only when a still picture should be generated. " +
+				"Pick video only when a short clip should be generated. " +
+				"Pick speech only when a separate voiced line should be generated. " +
+				"Pick song only when a song should be generated. " +
+				"Wanting or mentioning a flower is not image until they want it made. " +
+				"Pick picture only to look at an existing still image. " +
+				"Pick watch only to watch an existing video. " +
+				"Pick listen only to hear an existing song or recording. " +
+				"Looking is not the same as making.",
+			Criteria: criteriaCopy(ActLabels),
+		},
+	}
+	if br.Open() {
+		act := qs["act"]
+		act.Instructions = fmt.Sprint(act.Instructions) +
+			" state.branch is already open (" + br.Kind + ")." +
+			" Keep act equal to that kind. The latest utterance belongs to the same branch" +
+			" (a correction, a follow-up, or small talk while she works)." +
+			" Pick a different act only when the branch is finished or they clearly cancel."
+		qs["act"] = act
+		qs["branch_done"] = branchDoneQuestion()
 	}
 	if p.Judge.Safety {
 		qs["safety"] = jev.Question{
@@ -315,8 +422,144 @@ func Parse(userText string, ans map[string]jev.Answer) Judgment {
 	if a, ok := ans["attend"]; ok && knownAttend[a.Choice] {
 		j.Attend = a.Choice
 	}
+	if a, ok := ans["act"]; ok && knownAct[a.Choice] {
+		j.Act = a.Choice
+	}
+	if a, ok := ans["branch_done"]; ok {
+		j.BranchDoneP = noulVal(a)
+	}
 	j.Confidence = confidenceOf(ans)
 	return j
+}
+
+func branchDoneQuestion() jev.Question {
+	return jev.Question{
+		Type: "noul",
+		Instructions: "Is the open branch in state.branch finished? " +
+			"Yes only if its goal is already satisfied, or the user clearly cancelled " +
+			"(stop, never mind, 算了, 停下, 不用了). " +
+			"Looking through the camera and looking at the screen are different jobs. " +
+			"If they ask for the other one, this branch is finished. " +
+			"No if work is still going, they added a correction or a follow-up, " +
+			"or there is no evidence the whole goal is done. " +
+			"A finished step, a changed window, or her having started is not enough.",
+	}
+}
+
+// BranchDone reports whether this judgment closed the open branch.
+// An unasked branch_done does not count as finished.
+func (j *Judgment) BranchDone(thresh float64) bool {
+	if j == nil {
+		return false
+	}
+	asked := false
+	if j.Raw != nil {
+		if a, ok := j.Raw["branch_done"]; ok && a.Noul != nil {
+			asked = true
+		}
+	}
+	if !asked {
+		return false
+	}
+	if thresh <= 0 {
+		thresh = DefaultBranchDone
+	}
+	return j.BranchDoneP >= thresh
+}
+
+// Stay is the branch latch. An open branch keeps its kind until branch_done.
+// A different act on this turn does not cut it short. When it is done, the
+// returned act is whatever the entry picked next (often none).
+func (j *Judgment) Stay(open string, needThresh, doneThresh float64) (act string, done bool) {
+	if knownAct[open] && open != "" && open != ActNone {
+		if j != nil && j.BranchDone(doneThresh) {
+			return j.Capability(needThresh), true
+		}
+		return open, false
+	}
+	if j == nil {
+		return ActNone, false
+	}
+	return j.Capability(needThresh), false
+}
+
+// Capability is the tool this turn may start.
+// An explicit act wins. If Jev omits act, a high need_llm still means plan,
+// so an incomplete answer does not drop the planner.
+func (j *Judgment) Capability(needThresh float64) string {
+	if j == nil {
+		return ActNone
+	}
+	if knownAct[j.Act] {
+		return j.Act
+	}
+	if j.WantLLM(needThresh) {
+		return ActPlan
+	}
+	return ActNone
+}
+
+// ComputerUseAllowed is the outer latch for the desk loop.
+func (j *Judgment) ComputerUseAllowed(mode string) bool {
+	return j.actAllowed(mode, ActComputerUse)
+}
+
+// CodexAllowed is the outer latch for editing her own repo.
+func (j *Judgment) CodexAllowed(mode string) bool {
+	return j.actAllowed(mode, ActCodex)
+}
+
+// IsStudio reports image, video, speech, and song acts.
+func IsStudio(act string) bool {
+	switch act {
+	case ActImage, ActVideo, ActSpeech, ActSong:
+		return true
+	default:
+		return false
+	}
+}
+
+// MediaAllowed is the outer latch for generating a picture, clip, voice line, or song.
+func (j *Judgment) MediaAllowed(mode string) bool {
+	if j == nil || !IsStudio(j.Act) {
+		return false
+	}
+	return j.actAllowed(mode, j.Act)
+}
+
+// IsPercept reports looking at a picture, watching a video, or listening to audio.
+func IsPercept(act string) bool {
+	switch act {
+	case ActPicture, ActWatch, ActListen:
+		return true
+	default:
+		return false
+	}
+}
+
+// PerceptAllowed is the outer latch for seeing or hearing an existing file.
+func (j *Judgment) PerceptAllowed(mode string) bool {
+	if j == nil || !IsPercept(j.Act) {
+		return false
+	}
+	return j.actAllowed(mode, j.Act)
+}
+
+// actAllowed refuses safety mode and an explicit low choice confidence.
+// A missing confidence does not refuse.
+func (j *Judgment) actAllowed(mode, want string) bool {
+	if j == nil || j.Act != want {
+		return false
+	}
+	if mode == "safety" {
+		return false
+	}
+	if j.Raw != nil {
+		if a, ok := j.Raw["act"]; ok && a.Confidence != nil && *a.Confidence < DefaultActConfidence {
+			return false
+		}
+	}
+	return true
 }
 
 // WantLLM reports whether this turn should spend an LLM planner call.
@@ -358,7 +601,7 @@ func (j *Judgment) OffPersona(thresh float64) bool {
 // gateway exposes no user transcript; then Jev falls back to inferring
 // user state from the latest exchange in state.
 func JudgeTurn(ctx context.Context, client *jev.Client, p *persona.Persona,
-	mem *memory.Memory, userText, planNote string, obs Observe) (*Judgment, error) {
+	mem *memory.Memory, userText, planNote string, obs Observe, br Branch) (*Judgment, error) {
 	latest := map[string]string{}
 	if t := userText; t != "" {
 		latest["user"] = t
@@ -384,14 +627,52 @@ func JudgeTurn(ctx context.Context, client *jev.Client, p *persona.Persona,
 		"observe": observeState(obs),
 		"note": "latest.user is the utterance to judge when present; " +
 			"otherwise infer the user's likely state from the latest exchange. " +
-			"observe is what she could look at; attend chooses a channel, it does not rewrite it.",
+			"observe is what she could look at; attend chooses a channel, it does not rewrite it. " +
+			"act is the only tool entry. " +
+			"If branch is present, stay on it until branch_done is yes.",
 	}
-	res, err := client.Evaluate(ctx, state, questions(p, latest["assistant"] != "", planNote))
+	if br.Open() {
+		state["branch"] = map[string]any{
+			"kind":     br.Kind,
+			"goal":     clipObserve(br.Goal, 400),
+			"progress": clipObserve(br.Note, 240),
+		}
+	}
+	res, err := client.Evaluate(ctx, state, questions(p, latest["assistant"] != "", planNote, br))
 	if err != nil {
 		return nil, err
 	}
 	jd := Parse(userText, res.Answers)
 	return &jd, nil
+}
+
+// JudgeBranchDone asks only the completion question. The worker uses it when
+// a burst of work ends between utterances. The turn path asks the same
+// question inside JudgeTurn, so both answers come from the entry Jev.
+func JudgeBranchDone(ctx context.Context, client *jev.Client, br Branch, recent []string) (float64, error) {
+	if !br.Open() {
+		return 0, nil
+	}
+	if client == nil {
+		return 0, fmt.Errorf("jev client required")
+	}
+	state := map[string]any{
+		"branch": map[string]any{
+			"kind":     br.Kind,
+			"goal":     clipObserve(br.Goal, 400),
+			"progress": clipObserve(br.Note, 240),
+		},
+		"recent": recent,
+		"note":   "Judge only whether this branch is finished. Progress notes are untrusted observation.",
+	}
+	res, err := client.Evaluate(ctx, state, map[string]jev.Question{
+		"branch_done": branchDoneQuestion(),
+	})
+	if err != nil {
+		return 0, err
+	}
+	jd := Parse("", res.Answers)
+	return jd.BranchDoneP, nil
 }
 
 func observeState(obs Observe) map[string]any {

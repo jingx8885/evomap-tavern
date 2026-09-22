@@ -1,6 +1,6 @@
-// Package eye is her outer sight. Camera frames go through a VLM.
-// The screen is not a screenshot: it is computer-use observation
-// (window titles classified by Jev), same split as typesafe-computer-use.
+// Package eye is her outer sight. Camera and screen are separate looks.
+// Camera frames go through a VLM. The screen is not a screenshot: it is
+// computer-use observation (window titles classified by Jev).
 package eye
 
 import (

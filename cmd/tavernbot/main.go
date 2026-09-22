@@ -313,7 +313,7 @@ func cmdJudge(args []string) int {
 	p := mustPersona(*personaPath)
 	jc := jev.NewClient(config.ResolveBaseURL(*baseURL), mustKey(*key), "")
 	mem := memory.New(8)
-	jd, err := judge.JudgeTurn(context.Background(), jc, p, mem, *text, "", judge.Observe{})
+	jd, err := judge.JudgeTurn(context.Background(), jc, p, mem, *text, "", judge.Observe{}, judge.Branch{})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -808,7 +808,7 @@ done:
 	if strings.TrimSpace(user) != "" {
 		jc := jev.NewClient(config.ResolveBaseURL(*baseURL), mustKey(*key), "")
 		mem := memory.New(8)
-		if jd, jerr := judge.JudgeTurn(ctx, jc, p, mem, user, "", judge.Observe{}); jerr != nil {
+		if jd, jerr := judge.JudgeTurn(ctx, jc, p, mem, user, "", judge.Observe{}, judge.Branch{}); jerr != nil {
 			result["jev"] = jerr.Error()
 		} else {
 			result["jev_emotion"] = jd.Emotion

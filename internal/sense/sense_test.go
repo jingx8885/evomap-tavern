@@ -23,9 +23,9 @@ func TestParseAsk(t *testing.T) {
 		{"看看 internal/agent/agent.go", AskFile, "internal/agent/agent.go"},
 		{"how do you work", AskCode, ""},
 		{"who are you", AskExistence, ""},
-		{"你能看见我吗", AskSee, ""},
-		{"屏幕上有什么", AskSee, ""},
-		{"can you see me", AskSee, ""},
+		{"你能看见我吗", AskCamera, ""},
+		{"屏幕上有什么", AskScreen, ""},
+		{"can you see me", AskCamera, ""},
 		{"看看你的日志", AskLog, ""},
 		{"你能看到自己的日志吗", AskLog, ""},
 	}
@@ -142,9 +142,13 @@ func TestReadBodyAndFelt(t *testing.T) {
 		t.Fatalf("look missing excerpt: %q", look)
 	}
 	b.Set(func(l *Live) { l.Camera = "对面有个人"; l.Screen = "在写代码" })
-	see := b.Felt(p, Ask{Kind: AskSee}, "")
-	if !strings.Contains(see, "对面有个人") || !strings.Contains(see, "在写代码") {
-		t.Fatalf("see %q", see)
+	camAsk := b.Felt(p, Ask{Kind: AskCamera}, "")
+	if !strings.Contains(camAsk, "对面有个人") || strings.Contains(camAsk, "在写代码") {
+		t.Fatalf("camera ask %q", camAsk)
+	}
+	scrAsk := b.Felt(p, Ask{Kind: AskScreen}, "")
+	if !strings.Contains(scrAsk, "在写代码") || strings.Contains(scrAsk, "对面有个人") {
+		t.Fatalf("screen ask %q", scrAsk)
 	}
 	pulse = b.Felt(p, Ask{}, "none")
 	if strings.Contains(pulse, "对面有个人") || strings.Contains(pulse, "在写代码") {

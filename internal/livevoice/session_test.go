@@ -5,6 +5,32 @@ import (
 	"testing"
 )
 
+func TestFitAppendStaysUnderGatewayCap(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 800; i++ {
+		b.WriteString("日志报错")
+	}
+	raw := b.String()
+	if estimateTokens(raw) <= appendTokenCap {
+		t.Fatal("fixture should exceed the cap")
+	}
+	head := FitHead(raw)
+	tail := FitTail(raw)
+	if estimateTokens(head) > appendTokenCap || estimateTokens(tail) > appendTokenCap {
+		t.Fatalf("head %d tail %d cap %d", estimateTokens(head), estimateTokens(tail), appendTokenCap)
+	}
+	if !strings.HasSuffix(head, "…") || !strings.HasPrefix(tail, "…") {
+		t.Fatalf("head %q tail %q", head[:20], tail[:20])
+	}
+	if !strings.Contains(tail, "报错") {
+		t.Fatal("tail dropped the observation")
+	}
+	short := "mode=continue"
+	if FitHead(short) != short || FitTail(short) != short {
+		t.Fatal("short text should pass through")
+	}
+}
+
 func TestApplyTranscriptDeltas(t *testing.T) {
 	var b strings.Builder
 	for _, c := range []string{"你", "好", "呀", "?"} {

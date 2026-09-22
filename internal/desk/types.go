@@ -106,6 +106,7 @@ type Host interface {
 // Options configures Run.
 type Options struct {
 	Goal       string
+	GoalFn     func() string // if set, each step reads the live branch goal
 	Cwd        string
 	Prefer     string // cursor | codex | empty
 	Driver     string // empty/jev = Jev loop; "codex" = skip Jev, run Codex as CodexModel

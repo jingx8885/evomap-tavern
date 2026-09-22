@@ -138,26 +138,92 @@ func TestGateSkipsPrivate(t *testing.T) {
 	}
 }
 
-func TestLookNowCaptionsBoth(t *testing.T) {
-	llm := fakeVision{fn: func(context.Context, string, string, []byte) (string, error) {
-		return "看见你了。", nil
-	}}
+func TestGlanceIsOneSource(t *testing.T) {
+	var vlm atomic.Int32
+	var obs atomic.Int32
 	e := New(Options{
 		Screen: true,
-		LLM:    llm,
+		LLM: fakeVision{fn: func(context.Context, string, string, []byte) (string, error) {
+			vlm.Add(1)
+			return "看见你了。", nil
+		}},
 		Observe: func(context.Context) (ScreenView, error) {
+			obs.Add(1)
 			return ScreenView{Caption: "前台 notepad", Signature: "np"}, nil
 		},
 	})
 	if err := e.pushJPEG(SourceCamera, SolidJPEG(16, 16, color.Gray{Y: 20})); err != nil {
 		t.Fatal(err)
 	}
-	s := e.LookNow(context.Background())
-	if s.Camera.Caption == "" || s.Screen.Caption == "" {
-		t.Fatalf("%+v", s)
+	cam := e.Glance(context.Background(), SourceCamera)
+	if cam.Caption == "" {
+		t.Fatal("camera glance empty")
 	}
-	if !strings.Contains(s.Screen.Caption, "notepad") {
-		t.Fatalf("screen %q", s.Screen.Caption)
+	if obs.Load() != 0 {
+		t.Fatal("camera glance must not observe the screen")
+	}
+	if vlm.Load() != 1 {
+		t.Fatalf("vlm %d", vlm.Load())
+	}
+	if e.Snapshot().Screen.Caption != "" {
+		t.Fatal("camera glance wrote a screen caption")
+	}
+	scr := e.Glance(context.Background(), SourceScreen)
+	if !strings.Contains(scr.Caption, "notepad") {
+		t.Fatalf("screen %q", scr.Caption)
+	}
+	if obs.Load() != 1 || vlm.Load() != 1 {
+		t.Fatalf("obs=%d vlm=%d", obs.Load(), vlm.Load())
+	}
+	if e.Snapshot().Camera.Caption == "" {
+		t.Fatal("screen glance cleared the camera")
+	}
+}
+
+func TestPauseSkipsBackgroundModels(t *testing.T) {
+	var vlm atomic.Int32
+	var obs atomic.Int32
+	e := New(Options{
+		Camera:   true,
+		Screen:   true,
+		Interval: 20 * time.Millisecond,
+		Cooldown: time.Millisecond,
+		Jev:      fakeEval{noteworthy: 0.9, private: 0.1, mention: 0.1},
+		LLM: fakeVision{fn: func(context.Context, string, string, []byte) (string, error) {
+			vlm.Add(1)
+			return "摄像头里有人。", nil
+		}},
+		Observe: func(context.Context) (ScreenView, error) {
+			obs.Add(1)
+			return ScreenView{Caption: "前台 Cursor", Signature: "sig"}, nil
+		},
+	})
+	e.SetEnabled(false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.sampleScreen(ctx)
+	go e.loop(ctx)
+	if err := e.pushJPEG(SourceCamera, SolidJPEG(32, 32, color.White)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(120 * time.Millisecond)
+	if obs.Load() != 0 || vlm.Load() != 0 {
+		t.Fatalf("paused still called models obs=%d vlm=%d", obs.Load(), vlm.Load())
+	}
+	e.Glance(context.Background(), SourceScreen)
+	if obs.Load() != 1 {
+		t.Fatalf("one-shot glance obs=%d", obs.Load())
+	}
+	if vlm.Load() != 0 {
+		t.Fatal("screen glance must not call the camera model")
+	}
+	e.SetEnabled(true)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && (obs.Load() < 2 || vlm.Load() == 0) {
+		time.Sleep(15 * time.Millisecond)
+	}
+	if obs.Load() < 2 || vlm.Load() == 0 {
+		t.Fatalf("resume obs=%d vlm=%d", obs.Load(), vlm.Load())
 	}
 }
 

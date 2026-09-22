@@ -33,6 +33,9 @@
   };
   const mouthBar = document.querySelector("#mouth-bar > span");
   const unmuteBtn = document.getElementById("unmute");
+  const traceList = document.getElementById("trace-list");
+  const traceMeta = document.getElementById("trace-meta");
+  let traceStick = true;
 
   let app;
   let model;
@@ -46,6 +49,36 @@
 
   function setStatus(text) {
     statusEl.textContent = text;
+  }
+
+  function logKind(text) {
+    const m = /^\[([^\]]+)\]/.exec(text || "");
+    if (!m) return "note";
+    return m[1].split(/[\s~]/)[0];
+  }
+
+  function appendLog(at, text) {
+    if (!traceList || !text) return;
+    const empty = document.getElementById("trace-empty");
+    if (empty) empty.remove();
+    const li = document.createElement("li");
+    const kind = logKind(text);
+    li.dataset.kind = kind;
+    if (/fail|error|warning|失败|报错/i.test(text)) li.classList.add("fault");
+    const time = document.createElement("time");
+    const d = at ? new Date(at) : new Date();
+    time.dateTime = d.toISOString();
+    time.textContent = d.toLocaleTimeString("zh-CN", { hour12: false });
+    const span = document.createElement("span");
+    span.textContent = text;
+    li.append(time, span);
+    const nearEnd = traceList.scrollHeight - traceList.scrollTop - traceList.clientHeight < 48;
+    traceList.appendChild(li);
+    while (traceList.children.length > 200) {
+      traceList.removeChild(traceList.firstChild);
+    }
+    if (traceStick || nearEnd) traceList.scrollTop = traceList.scrollHeight;
+    if (traceMeta) traceMeta.textContent = traceList.children.length + " 条";
   }
 
   function setConn(state, label) {
@@ -265,11 +298,16 @@
     if (!model || !app) return;
     const w = app.renderer.width;
     const h = app.renderer.height;
+    const rail = document.getElementById("rail");
+    const hudBox = document.getElementById("hud");
+    const insetL = hudBox ? hudBox.getBoundingClientRect().width + 36 : 300;
+    const insetR = rail ? rail.getBoundingClientRect().width + 36 : 420;
+    const usable = Math.max(240, w - insetL - insetR);
     model.anchor.set(0.5, 0);
     model.scale.set(1);
-    const scale = Math.min((w * 0.78) / Math.max(model.width, 1), (h * 1.22) / Math.max(model.height, 1));
+    const scale = Math.min((usable * 0.92) / Math.max(model.width, 1), (h * 1.22) / Math.max(model.height, 1));
     model.scale.set(scale);
-    model.x = w * 0.57;
+    model.x = insetL + usable * 0.5;
     model.y = h * -0.06;
   }
 
@@ -277,6 +315,8 @@
   let camVideo = null;
   let camStream = null;
   let eyeTimer = null;
+  let eyesOn = true;
+  let eyesBusy = false;
 
   function sendEye(dataURL) {
     const payload = JSON.stringify({ type: "eye", source: "camera", data: dataURL });
@@ -292,7 +332,7 @@
   }
 
   function grabCamera() {
-    if (!camVideo || camVideo.videoWidth < 2) return;
+    if (!eyesOn || !camVideo || camVideo.videoWidth < 2) return;
     const max = 480;
     let w = camVideo.videoWidth;
     let h = camVideo.videoHeight;
@@ -318,13 +358,31 @@
     }, 2000);
   }
 
-  async function toggleCamera() {
+  function setCameraOn(on) {
+    const box = document.getElementById("cam");
     const btn = document.getElementById("eye-cam-btn");
+    if (box) box.classList.toggle("on", on);
+    if (btn) {
+      btn.classList.toggle("active", on);
+      btn.textContent = on ? "关闭" : "打开";
+    }
+  }
+
+  function stopCamera() {
+    if (camStream) camStream.getTracks().forEach(function (t) { t.stop(); });
+    camStream = null;
+    camVideo = null;
+    const video = document.getElementById("eye-cam");
+    if (video) {
+      video.pause();
+      video.srcObject = null;
+    }
+    setCameraOn(false);
+  }
+
+  async function toggleCamera() {
     if (camVideo) {
-      if (camStream) camStream.getTracks().forEach(function (t) { t.stop(); });
-      camStream = null;
-      camVideo = null;
-      if (btn) btn.classList.remove("active");
+      stopCamera();
       setStatus("camera off");
       return;
     }
@@ -341,22 +399,82 @@
       const track = stream.getVideoTracks()[0];
       if (track) {
         track.addEventListener("ended", function () {
-          camVideo = null;
-          camStream = null;
-          if (btn) btn.classList.remove("active");
+          stopCamera();
         });
       }
-      if (btn) btn.classList.add("active");
+      setCameraOn(true);
       ensureEyeTick();
       setStatus("camera on");
     } catch (err) {
+      stopCamera();
       setStatus("camera " + err);
+    }
+  }
+
+  function paintEyeSwitch(available) {
+    const btn = document.getElementById("eye-loop-btn");
+    if (!btn) return;
+    if (available === false) {
+      btn.disabled = true;
+      btn.classList.remove("active");
+      btn.textContent = "无观察";
+      return;
+    }
+    btn.disabled = false;
+    btn.classList.toggle("active", eyesOn);
+    btn.textContent = eyesOn ? "观察开" : "观察关";
+  }
+
+  async function syncEyes() {
+    if (eyesBusy) return;
+    try {
+      const r = await fetch("/api/eyes");
+      if (!r.ok) return;
+      const body = await r.json();
+      if (body && body.available === false) {
+        paintEyeSwitch(false);
+        return;
+      }
+      if (body && typeof body.on === "boolean") {
+        eyesOn = body.on;
+        paintEyeSwitch(true);
+        if (eyesOn && camVideo) ensureEyeTick();
+      }
+    } catch (e) {}
+  }
+
+  async function toggleEyes() {
+    if (eyesBusy) return;
+    const next = !eyesOn;
+    eyesBusy = true;
+    try {
+      const r = await fetch("/api/eyes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ on: next }),
+      });
+      if (!r.ok) {
+        setStatus("观察开关失败 " + r.status);
+        return;
+      }
+      const body = await r.json();
+      eyesOn = !!(body && body.on);
+      paintEyeSwitch(true);
+      if (eyesOn && camVideo) ensureEyeTick();
+      setStatus(eyesOn ? "观察开" : "观察关，后台不再打模型");
+    } catch (err) {
+      setStatus("观察开关 " + err);
+    } finally {
+      eyesBusy = false;
     }
   }
 
   function bindEyes() {
     const cam = document.getElementById("eye-cam-btn");
     if (cam) cam.addEventListener("click", function () { toggleCamera(); });
+    const loop = document.getElementById("eye-loop-btn");
+    if (loop) loop.addEventListener("click", function () { toggleEyes(); });
+    syncEyes();
   }
 
   function connectWS() {
@@ -378,6 +496,10 @@
           const msg = JSON.parse(ev.data);
           if (msg && msg.type === "lipsync") {
             applyLipsync(msg.mouth);
+            return;
+          }
+          if (msg && msg.type === "log") {
+            appendLog(msg.at, msg.text);
             return;
           }
           applyDrive(msg);
@@ -445,6 +567,14 @@
   }
 
   async function main() {
+    if (traceList) {
+      traceList.addEventListener("scroll", function () {
+        traceStick = traceList.scrollHeight - traceList.scrollTop - traceList.clientHeight < 48;
+      });
+    }
+    connectWS();
+    bindEyes();
+    setInterval(syncEyes, 2000);
     if (!window.PIXI || !PIXI.live2d) {
       setStatus("Cubism / Pixi runtime missing (CDN blocked?)");
       setConn("bad", "no runtime");
@@ -469,7 +599,6 @@
       }
     });
     bindModes();
-    bindEyes();
     pollSense();
     setInterval(pollSense, 2000);
     if (unmuteBtn) unmuteBtn.classList.add("hidden");
@@ -485,7 +614,6 @@
       get lipSyncIds() { return mouthIds(); },
       setMouth(v) { applyLipsync(v); },
     };
-    connectWS();
     setStatus("waiting for Jev…");
   }
 

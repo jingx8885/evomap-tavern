@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -12,13 +13,14 @@ import (
 type Eyes struct {
 	opt Options
 
-	mu     sync.Mutex
-	latest map[string]Frame
-	seen   map[string]Glimpse
-	thumbs map[string][]byte
-	lastV  map[string]time.Time
-	dirty  map[string]bool
-	scrSig string
+	mu      sync.Mutex
+	latest  map[string]Frame
+	seen    map[string]Glimpse
+	thumbs  map[string][]byte
+	lastV   map[string]time.Time
+	dirty   map[string]bool
+	scrSig  string
+	enabled atomic.Bool // background Jev/VLM; Glance still runs when this is off
 }
 
 // New builds a stopped pair. Start launches the goroutines.
@@ -29,13 +31,36 @@ func New(opt Options) *Eyes {
 	if opt.Cooldown <= 0 {
 		opt.Cooldown = 10 * time.Second
 	}
-	return &Eyes{
+	e := &Eyes{
 		opt:    opt,
 		latest: map[string]Frame{},
 		seen:   map[string]Glimpse{},
 		thumbs: map[string][]byte{},
 		lastV:  map[string]time.Time{},
 		dirty:  map[string]bool{},
+	}
+	e.enabled.Store(true)
+	return e
+}
+
+// Enabled reports whether the background sampler is calling models.
+func (e *Eyes) Enabled() bool {
+	return e != nil && e.enabled.Load()
+}
+
+// SetEnabled pauses or resumes background captions. A paused pair still
+// answers Glance, so /camera and /screen stay one-shot.
+func (e *Eyes) SetEnabled(on bool) {
+	if e == nil {
+		return
+	}
+	if e.enabled.Swap(on) == on {
+		return
+	}
+	if on {
+		e.log("eyes on")
+	} else {
+		e.log("eyes off")
 	}
 }
 
@@ -91,37 +116,35 @@ func (e *Eyes) Snapshot() Sight {
 	}
 }
 
-// LookNow forces a camera caption and a computer-use screen glance.
-func (e *Eyes) LookNow(ctx context.Context) Sight {
+// Glance forces one source and leaves the other alone.
+// Camera captions the latest JPEG. Screen takes a computer-use window snapshot.
+func (e *Eyes) Glance(ctx context.Context, source string) Glimpse {
 	if e == nil {
-		return Sight{}
+		return Glimpse{}
 	}
-	var wg sync.WaitGroup
-	if e.opt.Screen {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			e.refreshScreen(ctx, true)
-		}()
-	}
-	e.mu.Lock()
-	cam := e.latest[SourceCamera]
-	e.mu.Unlock()
-	if len(cam.JPEG) > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	switch source {
+	case SourceCamera:
+		e.mu.Lock()
+		cam := e.latest[SourceCamera]
+		e.mu.Unlock()
+		if len(cam.JPEG) > 0 {
 			e.describe(ctx, cam, true)
-		}()
+		}
+		s := e.Snapshot()
+		e.emit(s)
+		return s.Camera
+	case SourceScreen:
+		e.refreshScreen(ctx, true)
+		return e.Snapshot().Screen
+	default:
+		return Glimpse{}
 	}
-	wg.Wait()
-	s := e.Snapshot()
-	e.emit(s)
-	return s
 }
 
 func (e *Eyes) sampleScreen(ctx context.Context) {
-	e.refreshScreen(ctx, false)
+	if e.Enabled() {
+		e.refreshScreen(ctx, false)
+	}
 	tick := time.NewTicker(e.opt.Interval)
 	defer tick.Stop()
 	for {
@@ -129,6 +152,9 @@ func (e *Eyes) sampleScreen(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+			if !e.Enabled() {
+				continue
+			}
 			e.refreshScreen(ctx, false)
 		}
 	}
@@ -191,6 +217,9 @@ func (e *Eyes) loop(ctx context.Context) {
 }
 
 func (e *Eyes) tick(ctx context.Context) {
+	if !e.Enabled() {
+		return
+	}
 	e.mu.Lock()
 	var jobs []Frame
 	for src, f := range e.latest {

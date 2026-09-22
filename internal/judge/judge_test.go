@@ -61,6 +61,52 @@ func TestParse(t *testing.T) {
 	}
 }
 
+func TestCapability(t *testing.T) {
+	low := 0.1
+	j := Parse("hi", map[string]jev.Answer{"need_llm": {Noul: f(0.2)}})
+	if j.Act != "" || j.Capability(0.55) != ActNone {
+		t.Fatalf("omitted low need_llm stays none: %+v", j)
+	}
+	j = Parse("plan this", map[string]jev.Answer{"need_llm": {Noul: f(0.9)}})
+	if j.Capability(0.55) != ActPlan {
+		t.Fatal("omitted act with high need_llm is plan")
+	}
+	j = Parse("chat", map[string]jev.Answer{
+		"act":      {Choice: ActNone},
+		"need_llm": {Noul: f(0.9)},
+	})
+	if j.Capability(0.55) != ActNone {
+		t.Fatal("explicit none wins over need_llm")
+	}
+	j = Parse("open notepad", map[string]jev.Answer{"act": {Choice: ActComputerUse}})
+	if !j.ComputerUseAllowed("continue") {
+		t.Fatal("computer_use without a confidence should be allowed")
+	}
+	j = Parse("open notepad", map[string]jev.Answer{
+		"act": {Choice: ActComputerUse, Confidence: &low},
+	})
+	if j.ComputerUseAllowed("continue") {
+		t.Fatal("low confidence must hold computer use")
+	}
+	if j.ComputerUseAllowed("safety") {
+		t.Fatal("safety must hold computer use")
+	}
+	j = Parse("改你自己", map[string]jev.Answer{"act": {Choice: ActCodex}})
+	if !j.CodexAllowed("continue") || j.ComputerUseAllowed("continue") {
+		t.Fatal("codex is its own latch, not computer use")
+	}
+	j = Parse("改你自己", map[string]jev.Answer{
+		"act": {Choice: ActCodex, Confidence: &low},
+	})
+	if j.CodexAllowed("continue") {
+		t.Fatal("low confidence must hold codex")
+	}
+	j = Parse("huh", map[string]jev.Answer{"act": {Choice: "sudo"}})
+	if j.Act != "" || j.Capability(0.55) != ActNone {
+		t.Fatalf("unknown act dropped: %+v", j)
+	}
+}
+
 func TestDecideMode(t *testing.T) {
 	a := memory.Affect{Valence: 0.2, Arousal: 0.4, Emotion: "sadness"}
 	j := &Judgment{Emotion: "sadness", Valence: 0.2, Engagement: 0.8, SafetyP: 0.1}
@@ -156,6 +202,7 @@ func TestJudgeTurnAgainstFakeServer(t *testing.T) {
 				"self_emotion": map[string]any{"type": "choice", "choice": "joy"},
 				"mode":         map[string]any{"type": "choice", "choice": "celebrate"},
 				"attend":       map[string]any{"type": "choice", "choice": "none"},
+				"act":          map[string]any{"type": "choice", "choice": "none"},
 			},
 		})
 	}))
@@ -166,7 +213,7 @@ func TestJudgeTurnAgainstFakeServer(t *testing.T) {
 	mem := memory.New(8)
 	mem.Add(memory.Turn{Speaker: "assistant", Text: "welcome!"})
 	p.Reactions = map[string]string{"comfort": "先嫌一句，再帮忙"}
-	jd, err := JudgeTurn(context.Background(), jc, p, mem, "I love this place", "", Observe{})
+	jd, err := JudgeTurn(context.Background(), jc, p, mem, "I love this place", "", Observe{}, Branch{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +229,10 @@ func TestJudgeTurnAgainstFakeServer(t *testing.T) {
 	if jd.Attend != "none" {
 		t.Fatalf("attend %q", jd.Attend)
 	}
-	for _, q := range []string{"need_llm", "intent", "self_emotion", "mode", "attend"} {
+	if jd.Act != ActNone || jd.Capability(0.55) != ActNone {
+		t.Fatalf("act %+v", jd)
+	}
+	for _, q := range []string{"need_llm", "intent", "self_emotion", "mode", "attend", "act"} {
 		if _, ok := gotQuestions[q]; !ok {
 			t.Fatalf("turn judge must ask %s, got %v", q, gotQuestions)
 		}
@@ -194,5 +244,71 @@ func TestJudgeTurnAgainstFakeServer(t *testing.T) {
 	}
 	if s, _ := crit["comfort"].(string); !strings.Contains(s, "先嫌一句") {
 		t.Fatalf("mode criteria should carry persona reaction, got %v", crit["comfort"])
+	}
+	actQ, _ := gotQuestions["act"].(map[string]any)
+	actCrit, _ := actQ["criteria"].(map[string]any)
+	for _, id := range []string{"reflect", "look", "camera", "screen", "codex", "computer_use", "image", "video", "speech", "song", "picture", "watch", "listen"} {
+		if _, ok := actCrit[id]; !ok {
+			t.Fatalf("act must offer %s: %v", id, actCrit)
+		}
+	}
+	if _, ok := actCrit["see"]; ok {
+		t.Fatal("see is not a capability; camera and screen are separate")
+	}
+	if _, ok := gotQuestions["branch_done"]; ok {
+		t.Fatal("branch_done is only asked while a branch is open")
+	}
+}
+
+func TestBranchDoneOnlyWhileOpen(t *testing.T) {
+	p := &persona.Persona{Name: "t"}
+	closed := questions(p, false, "", Branch{})
+	if _, ok := closed["branch_done"]; ok {
+		t.Fatal("no open branch, no branch_done")
+	}
+	open := questions(p, false, "", Branch{Kind: ActComputerUse, Goal: "打开记事本"})
+	if _, ok := open["branch_done"]; !ok {
+		t.Fatal("open branch must ask branch_done")
+	}
+	act, _ := open["act"]
+	instr, _ := act.Instructions.(string)
+	if !strings.Contains(instr, "state.branch is already open") {
+		t.Fatal("open branch should tell act to stay")
+	}
+}
+
+func TestStayOnOpenBranch(t *testing.T) {
+	done := 0.9
+	open := Parse("继续", map[string]jev.Answer{
+		"act":         {Choice: ActNone},
+		"branch_done": {Noul: f(0.2)},
+	})
+	act, finished := open.Stay(ActComputerUse, 0.55, 0)
+	if finished || act != ActComputerUse {
+		t.Fatalf("open branch must stick, got %s done=%v", act, finished)
+	}
+	closed := Parse("好了", map[string]jev.Answer{
+		"act":         {Choice: ActNone},
+		"branch_done": {Noul: &done},
+	})
+	act, finished = closed.Stay(ActComputerUse, 0.55, 0)
+	if !finished || act != ActNone {
+		t.Fatalf("branch_done must release, got %s done=%v", act, finished)
+	}
+	next := Parse("再打开声音", map[string]jev.Answer{
+		"act":         {Choice: ActComputerUse},
+		"branch_done": {Noul: &done},
+	})
+	act, finished = next.Stay(ActCodex, 0.55, 0)
+	if !finished || act != ActComputerUse {
+		t.Fatalf("a finished branch can hand off, got %s done=%v", act, finished)
+	}
+	fresh := Parse("帮我开记事本", map[string]jev.Answer{"act": {Choice: ActComputerUse}})
+	act, finished = fresh.Stay("", 0.55, 0)
+	if finished || act != ActComputerUse {
+		t.Fatalf("no branch should follow act, got %s done=%v", act, finished)
+	}
+	if fresh.BranchDone(0) {
+		t.Fatal("unasked branch_done is not finished")
 	}
 }

@@ -6,6 +6,78 @@ import (
 	"time"
 )
 
+func TestViewerLogKeepsDecisionPath(t *testing.T) {
+	keep := []string{
+		"[judge] emotion=joy act=none",
+		"[steer] mode=continue",
+		"[user] 你好",
+		"[user~] 你",
+		"[assistant] 在。",
+		"[act] plan held mode=continue",
+		"[branch] open computer_use",
+		"[planner] need_llm=0.80 -> refining (async)",
+		"[eye] camera vlm: timeout",
+		"[eye] push camera: broken",
+	}
+	drop := []string{
+		"[livevoice] uplink: frames=10 max_rms=0.2",
+		"[eye] camera: 对面有个人",
+		"[eye] screen: 记事本",
+		"   ",
+	}
+	for _, line := range keep {
+		if !viewerLog(line) {
+			t.Fatalf("dropped decision line %q", line)
+		}
+	}
+	for _, line := range drop {
+		if viewerLog(line) {
+			t.Fatalf("noise leaked %q", line)
+		}
+	}
+}
+
+func TestCapabilitySlotOneComputerUse(t *testing.T) {
+	var s capabilitySlot
+	ok, gen := s.tryComputer()
+	if !ok {
+		t.Fatal("first computer use should start")
+	}
+	if ok, _ := s.tryComputer(); ok {
+		t.Fatal("a second computer use must wait")
+	}
+	s.endComputer(gen)
+	if ok, _ := s.tryComputer(); !ok {
+		t.Fatal("after the run ends, computer use can start again")
+	}
+}
+
+func TestBranchStaysUntilClosed(t *testing.T) {
+	var s capabilitySlot
+	s.open("computer_use", "打开记事本")
+	s.follow("把字号调大")
+	s.follow("打开记事本")
+	kind, goal, _ := s.current()
+	if kind != "computer_use" || goal != "打开记事本\n把字号调大" {
+		t.Fatalf("branch should keep the follow-up, got %s %q", kind, goal)
+	}
+	ok, gen := s.tryComputer()
+	if !ok {
+		t.Fatal("work should start")
+	}
+	s.close()
+	if kind, _, _ := s.current(); kind != "" {
+		t.Fatal("close should drop the branch")
+	}
+	s.mu.Lock()
+	s.computer = true
+	s.mu.Unlock()
+	s.endComputer(gen)
+	if !s.busy() {
+		t.Fatal("an old run must not clear a newer busy flag")
+	}
+}
+
 func TestJevGateDedupesExactUtterance(t *testing.T) {
 	g := newJevGate()
 	g.minInterval = 0

@@ -25,23 +25,30 @@ type Options struct {
 
 // Live is the current felt state of her running body.
 type Live struct {
-	StartedAt   time.Time     `json:"started_at"`
-	Voice       string        `json:"voice"` // up | down | connecting
-	Persona     string        `json:"persona,omitempty"`
-	VoiceName   string        `json:"voice_name,omitempty"`
-	Mode        string        `json:"mode,omitempty"`
-	Expression  string        `json:"expression,omitempty"`
-	Emotion     string        `json:"emotion,omitempty"`
-	Affect      memory.Affect `json:"affect"`
-	Plan        string        `json:"plan,omitempty"`
-	Mouth       float64       `json:"mouth,omitempty"`
-	Turns       int           `json:"turns"`
-	LastUser    string        `json:"last_user,omitempty"`
-	LastAsk     string        `json:"last_ask,omitempty"`
-	Camera      string        `json:"camera,omitempty"`
-	Screen      string        `json:"screen,omitempty"`
-	LastFault   string        `json:"last_fault,omitempty"`
-	LastFaultAt time.Time     `json:"last_fault_at,omitempty"`
+	StartedAt    time.Time     `json:"started_at"`
+	Voice        string        `json:"voice"` // up | down | connecting
+	Persona      string        `json:"persona,omitempty"`
+	VoiceName    string        `json:"voice_name,omitempty"`
+	Mode         string        `json:"mode,omitempty"`
+	Expression   string        `json:"expression,omitempty"`
+	Emotion      string        `json:"emotion,omitempty"`
+	Affect       memory.Affect `json:"affect"`
+	Plan         string        `json:"plan,omitempty"`
+	Mouth        float64       `json:"mouth,omitempty"`
+	Turns        int           `json:"turns"`
+	LastUser     string        `json:"last_user,omitempty"`
+	LastAsk      string        `json:"last_ask,omitempty"`
+	Camera       string        `json:"camera,omitempty"`
+	Screen       string        `json:"screen,omitempty"`
+	LastFault    string        `json:"last_fault,omitempty"`
+	LastFaultAt  time.Time     `json:"last_fault_at,omitempty"`
+	MakeKind     string        `json:"make_kind,omitempty"`
+	MakeStatus   string        `json:"make_status,omitempty"`
+	MakeProgress float64       `json:"make_progress,omitempty"`
+	MakeFile     string        `json:"make_file,omitempty"`
+	PerceptKind  string        `json:"percept_kind,omitempty"`
+	PerceptFile  string        `json:"percept_file,omitempty"`
+	Percept      string        `json:"percept,omitempty"`
 }
 
 // Snapshot is the full self-picture: who, now, body map, recent events.

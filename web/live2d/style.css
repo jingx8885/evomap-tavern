@@ -82,13 +82,6 @@ dd {
   flex-wrap: wrap;
   gap: 6px;
 }
-#eyes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 0 0 8px;
-}
-#eyes button,
 #modes button {
   background: rgba(255,255,255,0.02);
   color: var(--ink);
@@ -98,10 +91,10 @@ dd {
   font: inherit;
   border-radius: 999px;
 }
-#eyes button:hover,
-#eyes button.active,
 #modes button:hover,
-#modes button.active {
+#modes button.active,
+#cam header button:hover,
+#cam header button.active {
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -127,11 +120,135 @@ dd {
   width: 0%;
   background: var(--accent);
 }
-#status {
+#rail {
   position: fixed;
+  top: 16px;
   right: 16px;
-  bottom: 12px;
+  bottom: 16px;
+  width: min(420px, 36vw);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+#cam,
+#trace {
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px 12px;
+  background: linear-gradient(180deg, rgba(30,26,22,0.94), rgba(20,17,14,0.9));
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: 0 18px 60px rgba(0,0,0,0.24);
+}
+#cam { flex: none; }
+#cam header,
+#trace header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+#cam header .cam-actions {
+  display: flex;
+  gap: 6px;
+}
+#cam header button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+#cam header button {
+  background: rgba(255,255,255,0.02);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  padding: 4px 10px;
+  cursor: pointer;
+  font: inherit;
+  border-radius: 999px;
+}
+#cam-stage {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0e0c0a;
+}
+#eye-cam {
+  display: none;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);
+  background: #0e0c0a;
+}
+#cam.on #eye-cam { display: block; }
+#cam-idle {
+  position: absolute;
+  inset: 0;
   margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+#cam.on #cam-idle { display: none; }
+#trace {
+  flex: 1;
+  min-height: 0;
+}
+#trace-meta {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+#trace-list {
+  flex: 1;
+  overflow: auto;
+  margin: 0;
+  padding: 0 4px 0 0;
+  list-style: none;
+  font: 12px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+#trace-list li {
+  display: flex;
+  gap: 8px;
+  padding: 5px 0 5px 8px;
+  border-bottom: 1px solid var(--line);
+  border-left: 2px solid transparent;
+  word-break: break-word;
+}
+#trace-list time {
+  flex: none;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+#trace-empty {
+  color: var(--muted);
+  border-left-color: transparent;
+}
+#trace-list li[data-kind="judge"] { border-left-color: #d4a574; }
+#trace-list li[data-kind="judge"] span { color: #e7c89a; }
+#trace-list li[data-kind="steer"] { border-left-color: #d4a574; }
+#trace-list li[data-kind="act"],
+#trace-list li[data-kind="branch"] { border-left-color: #8fb596; }
+#trace-list li[data-kind="act"] span,
+#trace-list li[data-kind="branch"] span { color: #c5ddc4; }
+#trace-list li[data-kind="planner"],
+#trace-list li[data-kind="nudge"] { border-left-color: #8aa4c4; }
+#trace-list li[data-kind="planner"] span,
+#trace-list li[data-kind="nudge"] span { color: #c5d4e6; }
+#trace-list li[data-kind="user"],
+#trace-list li[data-kind="assistant"] { border-left-color: #f3eadc; }
+#trace-list li[data-kind="desk"],
+#trace-list li[data-kind="codex"],
+#trace-list li[data-kind="make"],
+#trace-list li[data-kind="percept"] { border-left-color: #c4b48a; }
+#trace-list li[data-kind="error"],
+#trace-list li.fault { border-left-color: #c47a6a; }
+#trace-list li[data-kind="error"] span,
+#trace-list li.fault span { color: #e7b2a6; }
+#status {
+  margin: 8px 0 0;
   color: var(--muted);
   font-size: 12px;
 }

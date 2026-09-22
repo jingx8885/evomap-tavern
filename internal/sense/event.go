@@ -13,6 +13,7 @@ const (
 	KindSteer   = "steer"
 	KindPlan    = "plan"
 	KindDesk    = "desk"
+	KindMake    = "make"
 	KindAvatar  = "avatar"
 	KindLook    = "look"
 	KindSee     = "see"

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>小春 · 桌面陪伴</title>
-  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/style.css?v=haru-eyes1" />
 </head>
 <body>
   <canvas id="stage"></canvas>
@@ -22,18 +22,38 @@
     </dl>
     <div id="mouth-bar"><span></span></div>
     <p id="hint">她在桌面边记账、盯着你没做完的事。摄像头只在她看见你时才有意义；屏幕观察走窗口快照。</p>
-    <div id="eyes">
-      <button type="button" id="eye-cam-btn">摄像头</button>
-    </div>
     <div id="modes"></div>
-    <video id="eye-cam" playsinline muted hidden></video>
     <canvas id="eye-canvas" hidden></canvas>
     <button type="button" id="unmute" class="hidden">开声音</button>
   </aside>
-  <p id="status">loading Cubism runtime…</p>
+  <aside id="rail">
+    <section id="cam">
+      <header>
+        <strong>摄像头</strong>
+        <span class="cam-actions">
+          <button type="button" id="eye-loop-btn" class="active" title="关掉后后台不再打 Jev 和视觉模型">观察开</button>
+          <button type="button" id="eye-cam-btn">打开</button>
+        </span>
+      </header>
+      <div id="cam-stage">
+        <video id="eye-cam" playsinline muted></video>
+        <p id="cam-idle">未打开</p>
+      </div>
+    </section>
+    <section id="trace">
+      <header>
+        <strong>日志</strong>
+        <span id="trace-meta">等待判断</span>
+      </header>
+      <ol id="trace-list">
+        <li id="trace-empty">连上之后，判断、steering、分支会记在这里。</li>
+      </ol>
+      <p id="status">loading Cubism runtime…</p>
+    </section>
+  </aside>
   <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
-  <script src="/app.js?v=haru-ip1"></script>
+  <script src="/app.js?v=haru-eyes1"></script>
 </body>
 </html>

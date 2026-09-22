@@ -43,6 +43,11 @@ func Run(ctx context.Context, opt Options) (*Report, error) {
 			rep.Status = "canceled"
 			return rep, err
 		}
+		if opt.GoalFn != nil {
+			if g := strings.TrimSpace(opt.GoalFn()); g != "" {
+				goal = g
+			}
+		}
 		snap, err := host.Snapshot(cwd)
 		if err != nil {
 			opt.log("snapshot: %v", err)
@@ -264,6 +269,11 @@ func codexModel(opt Options) string {
 
 func runCodexDirect(ctx context.Context, opt Options) (*Report, error) {
 	goal := strings.TrimSpace(opt.Goal)
+	if opt.GoalFn != nil {
+		if g := strings.TrimSpace(opt.GoalFn()); g != "" {
+			goal = g
+		}
+	}
 	cwd := resolveCwd(opt.Cwd)
 	model := codexModel(opt)
 	host := hostOf(opt)

@@ -27,20 +27,32 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+const logCap = 200
+
+// LogLine is one operator-facing trace line for the viewer.
+type LogLine struct {
+	At   time.Time `json:"at"`
+	Text string    `json:"text"`
+}
+
 // Hub broadcasts drive frames to Live2D viewers.
 type Hub struct {
 	mu      sync.Mutex
 	clients map[*websocket.Conn]*client
 	last    Frame
+	logs    []LogLine
 	mouth   atomic.Uint64
 	mouthAt atomic.Int64
 	senseFn atomic.Value // func() any
 	eyeFn   atomic.Value // func(source string, jpegDataURL string)
+	eyesGet func() bool
+	eyesSet func(bool)
 }
 
 type client struct {
 	frames chan Frame
 	pcm    chan []byte
+	logs   chan LogLine
 }
 
 // NewHub creates an empty hub with a default idle frame.
@@ -56,6 +68,62 @@ func (h *Hub) Last() Frame {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.last
+}
+
+// Log keeps an operator trace and pushes it to connected viewers.
+// Routine noise should be filtered before this call.
+func (h *Hub) Log(line string) {
+	if h == nil {
+		return
+	}
+	line = clipLog(line)
+	if line == "" {
+		return
+	}
+	entry := LogLine{At: time.Now(), Text: line}
+	h.mu.Lock()
+	h.logs = append(h.logs, entry)
+	if len(h.logs) > logCap {
+		h.logs = h.logs[len(h.logs)-logCap:]
+	}
+	var chans []chan LogLine
+	for _, c := range h.clients {
+		chans = append(chans, c.logs)
+	}
+	h.mu.Unlock()
+	for _, ch := range chans {
+		select {
+		case ch <- entry:
+		default:
+		}
+	}
+}
+
+// RecentLogs returns the trace, oldest first.
+func (h *Hub) RecentLogs() []LogLine {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]LogLine, len(h.logs))
+	copy(out, h.logs)
+	return out
+}
+
+func clipLog(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	r := []rune(s)
+	if len(r) > 280 {
+		return string(r[:280]) + "…"
+	}
+	return s
 }
 
 // Publish sends a frame to every connected viewer.
@@ -112,6 +180,18 @@ func (h *Hub) SetEye(fn func(source, dataURL string)) {
 	h.eyeFn.Store(fn)
 }
 
+// SetEyes registers the background-vision switch. get reports the current
+// state; set pauses or resumes model calls.
+func (h *Hub) SetEyes(get func() bool, set func(bool)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.eyesGet = get
+	h.eyesSet = set
+	h.mu.Unlock()
+}
+
 // PCM pushes a downlink s16le 24kHz chunk to every viewer for WebAudio playback.
 func (h *Hub) PCM(p []byte) {
 	if len(p) == 0 {
@@ -144,7 +224,9 @@ func (h *Hub) Handler(dir string) http.Handler {
 		json.NewEncoder(w).Encode(h.Last())
 	})
 	mux.HandleFunc("/api/sense", h.serveSense)
+	mux.HandleFunc("/api/log", h.serveLog)
 	mux.HandleFunc("/api/eye", h.serveEye)
+	mux.HandleFunc("/api/eyes", h.serveEyes)
 	mux.HandleFunc("/drive", h.serveDrive)
 	return mux
 }
@@ -157,6 +239,11 @@ func (h *Hub) serveSense(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(fn())
+}
+
+func (h *Hub) serveLog(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"lines": h.RecentLogs()})
 }
 
 func (h *Hub) serveEye(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +266,47 @@ func (h *Hub) serveEye(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+func (h *Hub) eyesState(set *bool) (bool, bool) {
+	if h == nil {
+		return false, false
+	}
+	h.mu.Lock()
+	get, setFn := h.eyesGet, h.eyesSet
+	h.mu.Unlock()
+	if get == nil || setFn == nil {
+		return false, false
+	}
+	if set != nil {
+		setFn(*set)
+	}
+	return get(), true
+}
+
+func (h *Hub) serveEyes(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	switch r.Method {
+	case http.MethodGet:
+		on, ok := h.eyesState(nil)
+		json.NewEncoder(w).Encode(map[string]any{"on": on, "available": ok})
+	case http.MethodPost:
+		var in struct {
+			On bool `json:"on"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&in); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		on, ok := h.eyesState(&in.On)
+		if !ok {
+			http.Error(w, "eyes down", http.StatusServiceUnavailable)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"on": on, "available": true})
+	default:
+		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
+	}
 }
 
 func (h *Hub) dispatchEye(source, dataURL string) bool {
@@ -238,10 +366,12 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 	cli := &client{
 		frames: make(chan Frame, 8),
 		pcm:    make(chan []byte, 64),
+		logs:   make(chan LogLine, 128),
 	}
 	h.mu.Lock()
 	h.clients[conn] = cli
 	last := h.last
+	backlog := append([]LogLine(nil), h.logs...)
 	h.mu.Unlock()
 	go h.readEye(conn)
 	go func() {
@@ -251,7 +381,15 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 			h.mu.Unlock()
 			conn.Close()
 		}()
-		_ = conn.WriteJSON(last)
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if err := conn.WriteJSON(last); err != nil {
+			return
+		}
+		for _, line := range backlog {
+			if err := writeLog(conn, line); err != nil {
+				return
+			}
+		}
 		ping := time.NewTicker(20 * time.Second)
 		mouthTick := time.NewTicker(50 * time.Millisecond)
 		defer ping.Stop()
@@ -265,6 +403,10 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 				}
 				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				if err := conn.WriteJSON(f); err != nil {
+					return
+				}
+			case line := <-cli.logs:
+				if err := writeLog(conn, line); err != nil {
 					return
 				}
 			case chunk := <-cli.pcm:
@@ -292,6 +434,15 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
+}
+
+func writeLog(conn *websocket.Conn, line LogLine) error {
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	return conn.WriteJSON(map[string]any{
+		"type": "log",
+		"at":   line.At.Format(time.RFC3339Nano),
+		"text": line.Text,
+	})
 }
 
 func (h *Hub) readEye(conn *websocket.Conn) {
