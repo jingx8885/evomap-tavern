@@ -376,64 +376,103 @@ func (s *Session) uplink(ctx context.Context) {
 	}
 }
 
-// uplinkMic paces RTP from capture itself. The old ticker + non-blocking
-// read stuffed silence whenever a mic frame was 1ms late, which shreds ASR.
+// uplinkLiveFrames is the most mic audio RTP may hold (6×20ms).
+// A deeper queue is a stale backlog. Flushing it later is a second
+// uplink, and server VAD treats that copy as a barge-in.
+const uplinkLiveFrames = 6
+
+func clipUplinkQueue(q [][]byte) (kept [][]byte, dropped int) {
+	if len(q) <= uplinkLiveFrames {
+		return q, 0
+	}
+	dropped = len(q) - uplinkLiveFrames
+	return q[dropped:], dropped
+}
+
+// uplinkMic sends one PCMU frame per 20ms of wall clock. Capture can
+// clump frames, and writing that clump immediately makes RTP timestamps
+// run ahead of arrival time. The gateway then plays the clump about two
+// seconds later and cuts the live utterance. Silence is sent only when
+// the queue is actually empty, so a frame that is 1ms late is not replaced.
 func (s *Session) uplinkMic(ctx context.Context, micFrames <-chan []byte, write func([]byte), silence []byte) {
-	var n, ducked int
+	var n, ducked, dropped int
 	var maxRMS, peakRMS float64
 	start := time.Now()
 	warned := false
 	lastLog := time.Now()
-	stall := time.NewTimer(80 * time.Millisecond)
-	defer stall.Stop()
-	resetStall := func() {
-		if !stall.Stop() {
+	var queued [][]byte
+	next := time.Now()
+	timer := time.NewTimer(audio.PCMUFrameDur)
+	defer timer.Stop()
+	for {
+		next = next.Add(audio.PCMUFrameDur)
+		if wait := time.Until(next); wait > 0 {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(wait)
 			select {
-			case <-stall.C:
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+			}
+		} else if wait < -audio.PCMUFrameDur {
+			// Fell behind the wall clock. Do not catch up with a burst.
+			next = time.Now()
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case f, ok := <-micFrames:
+				if !ok {
+					return
+				}
+				queued = append(queued, f)
+				var drop int
+				queued, drop = clipUplinkQueue(queued)
+				dropped += drop
 			default:
+				goto send
 			}
 		}
-		stall.Reset(80 * time.Millisecond)
-	}
-	for {
-		resetStall()
-		select {
-		case <-ctx.Done():
-			return
-		case f, ok := <-micFrames:
-			if !ok {
-				return
-			}
-			if r := audio.UlawRMS(f); r > maxRMS {
+	send:
+		frame := silence
+		live := len(queued) > 0
+		if live {
+			frame = queued[0]
+			queued = queued[1:]
+			if r := audio.UlawRMS(frame); r > maxRMS {
 				maxRMS = r
 			}
 			if maxRMS > peakRMS {
 				peakRMS = maxRMS
 			}
-			if !warned && time.Since(start) > 6*time.Second && peakRMS < 0.002 {
-				warned = true
-				s.emit(Event{Kind: EventWarning, Err: fmt.Errorf(
-					"mic has produced only silence for 6s (%s); speech will not be recognized "+
-						"- check the input device (TAVERN_MIC can force one) and mic permission", audio.MicFormat())})
+		}
+		if !warned && time.Since(start) > 6*time.Second && peakRMS < 0.002 {
+			warned = true
+			s.emit(Event{Kind: EventWarning, Err: fmt.Errorf(
+				"mic has produced only silence for 6s (%s); speech will not be recognized "+
+					"- check the input device (TAVERN_MIC can force one) and mic permission", audio.MicFormat())})
+		}
+		if live && time.Now().UnixNano() < s.duckMicUntil.Load() {
+			frame = silence
+			ducked++
+		}
+		n++
+		write(frame)
+		if s.Verbose && time.Since(lastLog) >= 2*time.Second {
+			s.logf("uplink: frames=%d max_rms=%.4f ducked=%d dropped=%d echo=%d format=%s",
+				n, maxRMS, ducked, dropped, s.echoN.Swap(0), audio.MicFormat())
+			if maxRMS < 0.002 {
+				s.logf("uplink: mic looks silent; speech will not be recognized")
 			}
-			frame := f
-			if time.Now().UnixNano() < s.duckMicUntil.Load() {
-				frame = silence
-				ducked++
-			}
-			n++
-			write(frame)
-			if s.Verbose && time.Since(lastLog) >= 2*time.Second {
-				s.logf("uplink: frames=%d max_rms=%.4f ducked=%d echo=%d format=%s",
-					n, maxRMS, ducked, s.echoN.Swap(0), audio.MicFormat())
-				if maxRMS < 0.002 {
-					s.logf("uplink: mic looks silent; speech will not be recognized")
-				}
-				n, ducked, maxRMS = 0, 0, 0
-				lastLog = time.Now()
-			}
-		case <-stall.C:
-			write(silence)
+			n, ducked, dropped, maxRMS = 0, 0, 0, 0
+			lastLog = time.Now()
 		}
 	}
 }

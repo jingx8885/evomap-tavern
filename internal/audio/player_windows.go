@@ -13,15 +13,18 @@ import (
 )
 
 const (
-	waveMapper         = 0xFFFFFFFF
-	waveFormatPCM      = 1
-	whdrDone           = 0x00000001
-	mmsyserrNoErr      = 0
-	winmmSrcFrameBytes = DownlinkRate * 2 / 50 // 20ms of 24kHz s16le
-	winmmFrameBytes    = PlayRate * 2 / 50     // 20ms of 48kHz s16le
-	winmmOutBufs       = 6
-	winmmPrimeBytes    = winmmSrcFrameBytes * 3 // ~60ms: enough jitter cover without sluggish start
-	winmmMaxAccBytes   = winmmSrcFrameBytes * 8 // cap software backlog at ~160ms
+	waveMapper            = 0xFFFFFFFF
+	waveFormatPCM         = 1
+	whdrDone              = 0x00000001
+	mmsyserrNoErr         = 0
+	wavErrUnprepared      = 34
+	winmmFrameMs          = 40
+	winmmSrcFrameBytes    = DownlinkRate * 2 * winmmFrameMs / 1000 // 40ms of 24kHz s16le
+	winmmFrameBytes       = PlayRate * 2 * winmmFrameMs / 1000     // 40ms of 48kHz s16le
+	winmmOutBufs          = 8                                      // 320ms queued in the device
+	winmmPrimeBytes       = winmmSrcFrameBytes * 4                 // ~160ms before the first utterance
+	winmmMaxAccBytes      = winmmSrcFrameBytes * 250               // ~10s safety valve; never punch holes in a live reply
+	threadPriorityHighest = 2
 )
 
 type waveFormatEx struct {
@@ -56,22 +59,27 @@ type waveInCapsW struct {
 }
 
 var (
-	modWinmm           = windows.NewLazySystemDLL("winmm.dll")
-	procWaveOutOpen    = modWinmm.NewProc("waveOutOpen")
-	procWaveOutClose   = modWinmm.NewProc("waveOutClose")
-	procWaveOutPrepare = modWinmm.NewProc("waveOutPrepareHeader")
-	procWaveOutUnprep  = modWinmm.NewProc("waveOutUnprepareHeader")
-	procWaveOutWrite   = modWinmm.NewProc("waveOutWrite")
-	procWaveOutReset   = modWinmm.NewProc("waveOutReset")
-	procWaveInOpen     = modWinmm.NewProc("waveInOpen")
-	procWaveInClose    = modWinmm.NewProc("waveInClose")
-	procWaveInPrepare  = modWinmm.NewProc("waveInPrepareHeader")
-	procWaveInUnprep   = modWinmm.NewProc("waveInUnprepareHeader")
-	procWaveInAddBuf   = modWinmm.NewProc("waveInAddBuffer")
-	procWaveInStart    = modWinmm.NewProc("waveInStart")
-	procWaveInReset    = modWinmm.NewProc("waveInReset")
-	procWaveInGetNum   = modWinmm.NewProc("waveInGetNumDevs")
-	procWaveInGetCaps  = modWinmm.NewProc("waveInGetDevCapsW")
+	modWinmm              = windows.NewLazySystemDLL("winmm.dll")
+	procWaveOutOpen       = modWinmm.NewProc("waveOutOpen")
+	procWaveOutClose      = modWinmm.NewProc("waveOutClose")
+	procWaveOutPrepare    = modWinmm.NewProc("waveOutPrepareHeader")
+	procWaveOutUnprep     = modWinmm.NewProc("waveOutUnprepareHeader")
+	procWaveOutWrite      = modWinmm.NewProc("waveOutWrite")
+	procWaveOutReset      = modWinmm.NewProc("waveOutReset")
+	procTimeBeginPeriod   = modWinmm.NewProc("timeBeginPeriod")
+	procTimeEndPeriod     = modWinmm.NewProc("timeEndPeriod")
+	modKernel32           = windows.NewLazySystemDLL("kernel32.dll")
+	procGetCurrentThread  = modKernel32.NewProc("GetCurrentThread")
+	procSetThreadPriority = modKernel32.NewProc("SetThreadPriority")
+	procWaveInOpen        = modWinmm.NewProc("waveInOpen")
+	procWaveInClose       = modWinmm.NewProc("waveInClose")
+	procWaveInPrepare     = modWinmm.NewProc("waveInPrepareHeader")
+	procWaveInUnprep      = modWinmm.NewProc("waveInUnprepareHeader")
+	procWaveInAddBuf      = modWinmm.NewProc("waveInAddBuffer")
+	procWaveInStart       = modWinmm.NewProc("waveInStart")
+	procWaveInReset       = modWinmm.NewProc("waveInReset")
+	procWaveInGetNum      = modWinmm.NewProc("waveInGetNumDevs")
+	procWaveInGetCaps     = modWinmm.NewProc("waveInGetDevCapsW")
 )
 
 func openWinmmPlayer() *Player {
@@ -106,10 +114,10 @@ func openWinmmPlayer() *Player {
 		return nil
 	}
 
-	// The gateway can deliver audio faster than real time. Keep this queue
-	// deliberately small: stale audio is worse than an occasional dropped
-	// frame for an interactive voice session.
-	in := make(chan []byte, 16)
+	// Idle silence is stripped before WritePCM. What remains is speech,
+	// often delivered faster than real time: buffer it and play at 1x.
+	// Dropping the oldest chunk here punched holes in the current reply.
+	in := make(chan []byte, 256)
 	stopCh := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -130,18 +138,6 @@ func openWinmmPlayer() *Player {
 		select {
 		case <-stopCh:
 		case in <- cp:
-		default:
-			// Drop the oldest queued chunk, then keep the newest audio.
-			// Never block the WebSocket reader behind speaker playback.
-			select {
-			case <-in:
-			default:
-			}
-			select {
-			case in <- cp:
-			case <-stopCh:
-			default:
-			}
 		}
 	}
 	var once atomic.Bool
@@ -159,40 +155,55 @@ func openWinmmPlayer() *Player {
 }
 
 type winmmOutBuf struct {
-	pcm  []byte
-	hdr  waveHdr
-	busy bool
+	pcm      []byte
+	hdr      waveHdr
+	busy     bool
+	prepared bool
 }
 
 func winmmLoop(hwo uintptr, in <-chan []byte, stop <-chan struct{}, event windows.Handle) {
-	defer func() {
-		_, _, _ = procWaveOutReset.Call(hwo)
-		_, _, _ = procWaveOutClose.Call(hwo)
-	}()
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	thread, _, _ := procGetCurrentThread.Call()
+	_, _, _ = procSetThreadPriority.Call(thread, threadPriorityHighest)
+	_, _, _ = procTimeBeginPeriod.Call(1)
+	defer procTimeEndPeriod.Call(1)
+
 	bufs := make([]winmmOutBuf, winmmOutBufs)
 	var pin runtime.Pinner
 	defer pin.Unpin()
+	hdrSize := uintptr(unsafe.Sizeof(waveHdr{}))
+	defer func() {
+		_, _, _ = procWaveOutReset.Call(hwo)
+		for i := range bufs {
+			if !bufs[i].prepared {
+				continue
+			}
+			_, _, _ = procWaveOutUnprep.Call(hwo, uintptr(unsafe.Pointer(&bufs[i].hdr)), hdrSize)
+		}
+		_, _, _ = procWaveOutClose.Call(hwo)
+	}()
 	for i := range bufs {
 		bufs[i].pcm = make([]byte, winmmFrameBytes)
 		bufs[i].hdr.Data = &bufs[i].pcm[0]
 		bufs[i].hdr.BufferLength = uint32(winmmFrameBytes)
 		pin.Pin(&bufs[i].pcm[0])
 		pin.Pin(&bufs[i].hdr)
+		r, _, _ := procWaveOutPrepare.Call(hwo, uintptr(unsafe.Pointer(&bufs[i].hdr)), hdrSize)
+		if r != mmsyserrNoErr {
+			return
+		}
+		bufs[i].prepared = true
 	}
 
 	acc := make([]byte, 0, winmmSrcFrameBytes*16)
-	primed := false
+	var cue playbackCue
 	for {
-		winmmRecycle(hwo, bufs)
-		// After an utterance the device drains. Starting the next one
-		// from a single 20ms buffer underruns immediately (stutter).
-		if primed && len(acc) < winmmSrcFrameBytes && !winmmAnyBusy(bufs) {
-			primed = false
-		}
-		if !primed && len(acc) >= winmmPrimeBytes {
-			primed = true
-		}
-		if primed {
+		winmmRecycle(bufs)
+		// Prime once per utterance. A short gap keeps the cue armed so the
+		// next phrase does not sit through another prebuffer (that restart
+		// is the chop between words).
+		if cue.ready(len(acc), winmmAnyBusy(bufs), time.Now(), winmmSrcFrameBytes, winmmPrimeBytes) {
 			if err := winmmFill(hwo, bufs, &acc); err != nil {
 				return
 			}
@@ -205,9 +216,10 @@ func winmmLoop(hwo uintptr, in <-chan []byte, stop <-chan struct{}, event window
 				return
 			}
 			acc = append(acc, pcm...)
+			acc = winmmDrain(in, acc)
 			if len(acc) > winmmMaxAccBytes {
-				// Preserve the newest samples so a burst cannot turn into
-				// seconds of lip/audio skew.
+				// Pathological backlog only. A normal TTS burst must play
+				// through; trimming mid-utterance is what sounded choppy.
 				copy(acc, acc[len(acc)-winmmMaxAccBytes:])
 				acc = acc[:winmmMaxAccBytes]
 			}
@@ -221,6 +233,20 @@ func winmmLoop(hwo uintptr, in <-chan []byte, stop <-chan struct{}, event window
 	}
 }
 
+func winmmDrain(in <-chan []byte, acc []byte) []byte {
+	for {
+		select {
+		case pcm, ok := <-in:
+			if !ok {
+				return acc
+			}
+			acc = append(acc, pcm...)
+		default:
+			return acc
+		}
+	}
+}
+
 func winmmAnyBusy(bufs []winmmOutBuf) bool {
 	for i := range bufs {
 		if bufs[i].busy {
@@ -230,19 +256,21 @@ func winmmAnyBusy(bufs []winmmOutBuf) bool {
 	return false
 }
 
-func winmmRecycle(hwo uintptr, bufs []winmmOutBuf) {
-	size := uintptr(unsafe.Sizeof(waveHdr{}))
+func winmmRecycle(bufs []winmmOutBuf) {
 	for i := range bufs {
 		if !bufs[i].busy || bufs[i].hdr.Flags&whdrDone == 0 {
 			continue
 		}
-		_, _, _ = procWaveOutUnprep.Call(hwo, uintptr(unsafe.Pointer(&bufs[i].hdr)), size)
+		// Header stays prepared. Unprepare/prepare on every 20ms block
+		// left a gap the device played as a click.
+		bufs[i].hdr.Flags &^= whdrDone
 		bufs[i].busy = false
 	}
 }
 
 func winmmFill(hwo uintptr, bufs []winmmOutBuf, acc *[]byte) error {
 	size := uintptr(unsafe.Sizeof(waveHdr{}))
+	frameSamples := winmmSrcFrameBytes / 2
 	for i := range bufs {
 		if bufs[i].busy {
 			continue
@@ -250,18 +278,23 @@ func winmmFill(hwo uintptr, bufs []winmmOutBuf, acc *[]byte) error {
 		if len(*acc) < winmmSrcFrameBytes {
 			return nil
 		}
-		up := UpsampleS16LE2x((*acc)[:winmmSrcFrameBytes])
+		UpsampleS16LE2xFrame(bufs[i].pcm, *acc, frameSamples)
 		*acc = (*acc)[winmmSrcFrameBytes:]
-		copy(bufs[i].pcm, up)
-		bufs[i].hdr.Flags = 0
+		bufs[i].hdr.Flags &^= whdrDone
 		bufs[i].hdr.BytesRecorded = 0
-		r, _, err := procWaveOutPrepare.Call(hwo, uintptr(unsafe.Pointer(&bufs[i].hdr)), size)
-		if r != mmsyserrNoErr {
-			return fmt.Errorf("waveOutPrepareHeader: %v", err)
+		if bufs[i].hdr.Flags&whdrPrepared == 0 {
+			bufs[i].hdr.Flags |= whdrPrepared
 		}
-		r, _, err = procWaveOutWrite.Call(hwo, uintptr(unsafe.Pointer(&bufs[i].hdr)), size)
+		r, _, err := procWaveOutWrite.Call(hwo, uintptr(unsafe.Pointer(&bufs[i].hdr)), size)
+		if r == wavErrUnprepared {
+			bufs[i].hdr.Flags = 0
+			r, _, err = procWaveOutPrepare.Call(hwo, uintptr(unsafe.Pointer(&bufs[i].hdr)), size)
+			if r != mmsyserrNoErr {
+				return fmt.Errorf("waveOutPrepareHeader: %v", err)
+			}
+			r, _, err = procWaveOutWrite.Call(hwo, uintptr(unsafe.Pointer(&bufs[i].hdr)), size)
+		}
 		if r != mmsyserrNoErr {
-			_, _, _ = procWaveOutUnprep.Call(hwo, uintptr(unsafe.Pointer(&bufs[i].hdr)), size)
 			return fmt.Errorf("waveOutWrite: %v", err)
 		}
 		bufs[i].busy = true

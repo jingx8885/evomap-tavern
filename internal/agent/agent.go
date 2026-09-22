@@ -306,15 +306,11 @@ func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
 						l.LastUser = clip(ev.Text, 160)
 					}
 				})
-				gate.cancelTimer()
+				gate.closeUtterance()
 				go processTurn(ctx, opt, p, jevClient, mem, pl, sess, gate, ev.Text, true)
 			case livevoice.EventTranscript:
 				if ev.Speaker == "user" {
 					opt.log("[user~] %s", clip(ev.Text, 120))
-					text := ev.Text
-					gate.schedule(320*time.Millisecond, text, func() {
-						go processTurn(ctx, opt, p, jevClient, mem, pl, sess, gate, text, false)
-					})
 				}
 			case livevoice.EventWarning:
 				opt.log("[voice warning] %v", ev.Err)
@@ -334,20 +330,34 @@ func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
 	}
 }
 
-// jevGate dedupes speculative (partial transcript) and final turn judgments.
+// jevMinInterval is the floor between /v1/systemone calls. Live VAD splits
+// one stretch of speech into a turn every couple of seconds; judging each
+// of those turns is what made Jev fire continuously.
+const jevMinInterval = 10 * time.Second
+
+// earlyMinRunes keeps a one-character ASR fragment from spending a Jev call.
+const earlyMinRunes = 8
+
+// jevGate dedupes turn judgments. Partial transcripts do not call Jev;
+// turn.done does, and not again until jevMinInterval has passed.
 type jevGate struct {
-	mu       sync.Mutex
-	timer    *time.Timer
-	pending  string
-	inflight map[string]bool
-	done     map[string]time.Time
-	last     *judge.Judgment
+	mu          sync.Mutex
+	timer       *time.Timer
+	pending     string
+	inflight    map[string]bool
+	done        map[string]time.Time
+	last        *judge.Judgment
+	speculative string
+	epoch       uint64
+	lastCall    time.Time
+	minInterval time.Duration
 }
 
 func newJevGate() *jevGate {
 	return &jevGate{
-		inflight: map[string]bool{},
-		done:     map[string]time.Time{},
+		inflight:    map[string]bool{},
+		done:        map[string]time.Time{},
+		minInterval: jevMinInterval,
 	}
 }
 
@@ -377,24 +387,63 @@ func (g *jevGate) schedule(delay time.Duration, text string, fn func()) {
 func (g *jevGate) cancelTimer() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.stopTimerLocked()
+}
+
+func (g *jevGate) stopTimerLocked() {
 	if g.timer != nil {
 		g.timer.Stop()
 		g.timer = nil
 	}
 }
 
-func (g *jevGate) claim(text string) bool {
+// wantEarly reports whether this partial transcript may spend the one
+// speculative Jev call for the current utterance.
+func (g *jevGate) wantEarly(text string) bool {
 	n := strings.Join(strings.Fields(text), " ")
-	if n == "" {
+	if len([]rune(n)) < earlyMinRunes {
 		return false
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	return g.speculative == ""
+}
+
+// closeUtterance ends the speculative window. A late early result must not
+// overwrite the turn.done judgment.
+func (g *jevGate) closeUtterance() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.stopTimerLocked()
+	g.speculative = ""
+	g.epoch++
+}
+
+func (g *jevGate) claim(text string) bool {
+	ok, _ := g.claimEpoch(text, false)
+	return ok
+}
+
+func (g *jevGate) claimEpoch(text string, speculative bool) (bool, uint64) {
+	n := strings.Join(strings.Fields(text), " ")
+	if n == "" {
+		return false, 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if speculative {
+		if g.speculative != "" || len([]rune(n)) < earlyMinRunes {
+			return false, 0
+		}
+	}
+	if g.minInterval > 0 && !g.lastCall.IsZero() && time.Since(g.lastCall) < g.minInterval {
+		return false, 0
+	}
 	if g.inflight[n] {
-		return false
+		return false, 0
 	}
 	if t, ok := g.done[n]; ok && time.Since(t) < 15*time.Second {
-		return false
+		return false, 0
 	}
 	now := time.Now()
 	for prev, t := range g.done {
@@ -403,7 +452,23 @@ func (g *jevGate) claim(text string) bool {
 		}
 	}
 	g.inflight[n] = true
-	return true
+	g.lastCall = time.Now()
+	if speculative {
+		g.speculative = n
+	}
+	return true, g.epoch
+}
+
+func (g *jevGate) cooling() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.minInterval > 0 && !g.lastCall.IsZero() && time.Since(g.lastCall) < g.minInterval
+}
+
+func (g *jevGate) current(epoch uint64) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.epoch == epoch
 }
 
 func (g *jevGate) finish(text string, ok bool) {
@@ -413,6 +478,11 @@ func (g *jevGate) finish(text string, ok bool) {
 	delete(g.inflight, n)
 	if ok {
 		g.done[n] = time.Now()
+		return
+	}
+	g.lastCall = time.Time{}
+	if g.speculative == n {
+		g.speculative = ""
 	}
 }
 
@@ -428,9 +498,8 @@ func (g *jevGate) lastJudgment() *judge.Judgment {
 	return g.last
 }
 
-// processTurn runs Jev judgment + steering + planner tick for one turn.
-// Speculative calls (final=false) run from a debounced user transcript so
-// steering can land while the duplex model is still speaking.
+// processTurn runs Jev judgment + steering + planner tick for one finished turn.
+// Partial transcripts do not call Jev. turn.done does, at most once per jevMinInterval.
 func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 	jc *jev.Client, mem *memory.Memory, pl *planner.Planner,
 	sess *livevoice.Session, gate *jevGate, userText string, final bool) {
@@ -440,14 +509,24 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 	if strings.TrimSpace(userText) == "" {
 		return
 	}
-	claimed := gate.claim(userText)
+	claimed, epoch := gate.claimEpoch(userText, !final)
 	if claimed {
-		jd, err := judge.JudgeTurn(ctx, jc, p, mem, userText, pl.Current())
+		var obs judge.Observe
+		if opt.sense != nil {
+			live := opt.sense.Live()
+			obs.Camera = live.Camera
+			obs.Screen = live.Screen
+			obs.Log = opt.sense.LogTail(6)
+		}
+		jd, err := judge.JudgeTurn(ctx, jc, p, mem, userText, pl.Current(), obs)
 		if err != nil {
 			gate.finish(userText, false)
 			opt.log("[judge] skipped: %v", err)
 		} else {
 			gate.finish(userText, true)
+			if !gate.current(epoch) {
+				return
+			}
 			safety := jd.SafetyP >= p.Judge.SafetyThresh
 			mem.UpdateAffect(jd.Valence, jd.Arousal, jd.Emotion, safety)
 			affect := mem.Affect()
@@ -455,8 +534,8 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 			if !final {
 				tag = " early"
 			}
-			opt.log("[judge]%s emotion=%s intent=%s self=%s jev_mode=%s valence=%.2f arousal=%.2f engage=%.2f safety=%.2f fit=%.2f need_llm=%.2f conf=%.2f",
-				tag, jd.Emotion, orDash(jd.Intent), orDash(jd.SelfEmotion), orDash(jd.Mode),
+			opt.log("[judge]%s emotion=%s intent=%s self=%s jev_mode=%s attend=%s valence=%.2f arousal=%.2f engage=%.2f safety=%.2f fit=%.2f need_llm=%.2f conf=%.2f",
+				tag, jd.Emotion, orDash(jd.Intent), orDash(jd.SelfEmotion), orDash(jd.Mode), orDash(jd.Attend),
 				jd.Valence, jd.Arousal, jd.Engagement, jd.SafetyP, jd.PersonaFitP, jd.NeedLLMP, jd.Confidence)
 
 			mode := judge.DecideMode(jd, affect, p.Judge.SafetyThresh, pl.Current())
@@ -495,7 +574,7 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 			if ask.Kind != "" {
 				opt.sense.Set(func(l *sense.Live) { l.LastAsk = ask.Kind })
 			}
-			if felt := opt.sense.Felt(p, ask); felt != "" {
+			if felt := opt.sense.Felt(p, ask, jd.Attend); felt != "" {
 				note = note + " " + felt
 			}
 			if err := sess.Steer(note); err != nil {
@@ -505,6 +584,17 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 				opt.sense.Emit(sense.Event{Kind: sense.KindSteer, Summary: mode})
 			}
 			gate.remember(jd)
+		}
+	} else if final && gate.cooling() {
+		opt.log("[judge] skip (within %s)", gate.minInterval)
+		// A log question still has to land. Cooling must not drop the
+		// journal, or she answers as if she cannot see her own log.
+		if ask := sense.ParseAsk(userText); opt.sense != nil && (ask.Kind == sense.AskLog || ask.Kind == sense.AskSee) {
+			if felt := opt.sense.Felt(p, ask, ""); felt != "" {
+				if err := sess.Steer(felt); err != nil {
+					opt.log("[steer] observe failed: %v", err)
+				}
+			}
 		}
 	}
 	if !final {
@@ -561,9 +651,14 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 		raw, _ := json.MarshalIndent(opt.sense.Snapshot(p.Name), "", "  ")
 		opt.log("[sense]\n%s", raw)
 		opt.sense.Emit(sense.Event{Kind: sense.KindCommand, Summary: "/sense"})
-		if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskBody}); felt != "" {
+		if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskBody}, ""); felt != "" {
 			if err := sess.Steer(felt); err != nil {
 				opt.log("[sense] steer failed: %v", err)
+			}
+		}
+		if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskLog}, "log"); felt != "" {
+			if err := sess.Steer(felt); err != nil {
+				opt.log("[sense] log steer failed: %v", err)
 			}
 		}
 	case strings.HasPrefix(line, "/look "):
@@ -579,7 +674,7 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 		}
 		opt.log("[look] %s lines=%d clipped=%v", view.Path, view.Lines, view.Clipped)
 		opt.sense.Emit(sense.Event{Kind: sense.KindLook, Summary: view.Path})
-		if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskFile, File: view.Path}); felt != "" {
+		if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskFile, File: view.Path}, ""); felt != "" {
 			if err := sess.Steer(felt); err != nil {
 				opt.log("[look] steer failed: %v", err)
 			}
@@ -593,7 +688,7 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 		opt.log("[see] camera=%s screen=%s", clip(s.Camera.Caption, 80), clip(s.Screen.Caption, 80))
 		if opt.sense != nil {
 			opt.sense.Emit(sense.Event{Kind: sense.KindCommand, Summary: "/see"})
-			if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskSee}); felt != "" {
+			if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskSee}, "eyes"); felt != "" {
 				if err := sess.Steer(felt); err != nil {
 					opt.log("[see] steer failed: %v", err)
 				}
@@ -764,11 +859,15 @@ func slugify(s string) string {
 }
 
 func (o Options) log(format string, args ...any) {
+	line := fmt.Sprintf(format, args...)
 	if o.LogFn != nil {
-		o.LogFn(fmt.Sprintf(format, args...))
-		return
+		o.LogFn(line)
+	} else {
+		fmt.Printf("%s\n", line)
 	}
-	fmt.Printf(format+"\n", args...)
+	if o.sense != nil {
+		o.sense.Note(line)
+	}
 }
 
 func clip(s string, n int) string {

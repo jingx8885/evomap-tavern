@@ -14,6 +14,7 @@ const (
 	AskCode      = "code"      // how are you made / your source
 	AskFile      = "file"      // a specific file in her body
 	AskSee       = "see"       // camera / screen
+	AskLog       = "log"       // her own process log
 )
 
 // Ask is a parsed self-inquiry.
@@ -28,6 +29,7 @@ var (
 	bodyRe  = regexp.MustCompile(`(?i)(感知自己|感觉到自己|感觉得到自己|看见自己|看到自己|你的身体|能感觉到|能看见自己|feel yourself|see yourself|perceive yourself|self[- ]aware|aware of yourself)`)
 	codeRe  = regexp.MustCompile(`(?i)(你的代码|你的源码|你的源代码|自己的代码|自己的源码|源代码|怎么工作|怎么构成|怎么活着|你是怎么|how (do|are) you (work|made|built)|your code|source code|your source)`)
 	seeRe   = regexp.MustCompile(`(?i)(看见我|看到我|看得到我|看得到吗|你能看见|你看得见|摄像头|镜头|我的屏幕|屏幕上|屏幕里|你在看什么|看见什么|can you see( me)?|see me|look at me|what('s| is) on (my )?screen|do you see)`)
+	logRe   = regexp.MustCompile(`(?i)(你的日志|自己的日志|运行日志|看看日志|看日志|日志里|报错|出错|error log|your logs|the log)`)
 )
 
 // ParseAsk classifies a user utterance. File > code > body > existence.
@@ -45,6 +47,9 @@ func ParseAsk(text string) Ask {
 	}
 	if codeRe.MatchString(t) {
 		return Ask{Kind: AskCode}
+	}
+	if logRe.MatchString(t) {
+		return Ask{Kind: AskLog}
 	}
 	if seeRe.MatchString(t) {
 		return Ask{Kind: AskSee}

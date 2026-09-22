@@ -135,6 +135,55 @@ func UpsampleS16LE2x(pcm []byte) []byte {
 	return out
 }
 
+// UpsampleS16LE2xFrame writes a 2x upsample of the first frameSamples of src
+// into dst. When src already holds the next sample, the last midpoint uses
+// it so a block boundary does not hold and click.
+func UpsampleS16LE2xFrame(dst, src []byte, frameSamples int) {
+	if frameSamples < 1 || len(src) < frameSamples*2 || len(dst) < frameSamples*4 {
+		return
+	}
+	for i := 0; i < frameSamples; i++ {
+		a := int16(binary.LittleEndian.Uint16(src[i*2:]))
+		b := a
+		if (i+1)*2+1 < len(src) {
+			b = int16(binary.LittleEndian.Uint16(src[(i+1)*2:]))
+		}
+		binary.LittleEndian.PutUint16(dst[i*4:], uint16(a))
+		binary.LittleEndian.PutUint16(dst[i*4+2:], uint16(int16((int32(a)+int32(b))/2)))
+	}
+}
+
+// playbackIdleReset is how long the device may sit empty before the next
+// utterance has to prebuffer again. Re-arming that wait on every brief
+// pause chops the phrase apart.
+const playbackIdleReset = 250 * time.Millisecond
+
+// playbackCue gates when queued PCM may be handed to the sound device.
+// The first utterance waits for primeBytes so one short buffer cannot
+// underrun. After a drain, that wait stays off until the idle gap exceeds
+// playbackIdleReset.
+type playbackCue struct {
+	primed    bool
+	drainedAt time.Time
+}
+
+func (c *playbackCue) ready(accBytes int, deviceBusy bool, now time.Time, frameBytes, primeBytes int) bool {
+	if accBytes >= frameBytes || deviceBusy {
+		c.drainedAt = time.Time{}
+	} else {
+		if c.drainedAt.IsZero() {
+			c.drainedAt = now
+		}
+		if c.primed && !now.Before(c.drainedAt.Add(playbackIdleReset)) {
+			c.primed = false
+		}
+	}
+	if !c.primed && accBytes >= primeBytes {
+		c.primed = true
+	}
+	return c.primed
+}
+
 // WriteWAV writes PCM s16le mono to a WAV file.
 func WriteWAV(path string, pcm []byte, sampleRate int) error {
 	var buf bytes.Buffer
@@ -390,6 +439,38 @@ func SilenceFrames(stop <-chan struct{}) <-chan []byte {
 	return out
 }
 
+// OfferFrame queues one captured uplink frame without blocking the
+// capture thread. A full queue drops the oldest frame. Blocking here
+// stalls waveIn; the driver then holds a seconds-long backlog and that
+// second copy is sent later, which server VAD hears as a barge-in.
+func OfferFrame(out chan []byte, stop <-chan struct{}, frame []byte) bool {
+	select {
+	case <-stop:
+		return false
+	default:
+	}
+	select {
+	case out <- frame:
+		return true
+	default:
+	}
+	select {
+	case <-out:
+	default:
+	}
+	select {
+	case <-stop:
+		return false
+	default:
+	}
+	select {
+	case out <- frame:
+		return true
+	default:
+		return true
+	}
+}
+
 // ErrNoMicDevice means no capture device is available in this build.
 var ErrNoMicDevice = errors.New("microphone capture requires build tag tavern_mic; using silence uplink")
 
@@ -533,8 +614,8 @@ func MouthOpen(pcm []byte) float64 {
 const mouthFrameBytes = mouthWindow * 2
 
 const (
-	downlinkGatePreRollFrames  = 2 // keep 40ms before detected speech
-	downlinkGateHangoverFrames = 6 // keep pauses up to 120ms inside an utterance
+	downlinkGatePreRollFrames  = 2  // keep 40ms before detected speech
+	downlinkGateHangoverFrames = 20 // keep pauses up to 400ms so the device does not drain between phrases
 )
 
 // DownlinkGate removes the gateway's unbounded idle silence while preserving

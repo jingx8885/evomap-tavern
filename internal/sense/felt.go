@@ -10,7 +10,7 @@ import (
 
 // Felt builds a proprioception note for the voice model.
 // Compact on ordinary turns; richer when the user asked about her.
-func (b *Bus) Felt(p *persona.Persona, ask Ask) string {
+func (b *Bus) Felt(p *persona.Persona, ask Ask, attend string) string {
 	if b == nil || p == nil || !p.Sense.Enabled {
 		return ""
 	}
@@ -19,12 +19,43 @@ func (b *Bus) Felt(p *persona.Persona, ask Ask) string {
 	case AskFile, AskCode:
 		return b.feltLook(p, live, ask)
 	case AskSee:
-		return feltSee(live)
+		if attend == "" {
+			attend = "eyes"
+		}
+		return feltSee(live, attend)
+	case AskLog:
+		if attend == "" {
+			attend = "log"
+		}
+		if !seeLog(attend) {
+			note := "This turn the log was not given to you. If they asked, say you are not reading it right now. Do not invent entries."
+			if seeCamera(attend) || seeScreen(attend) {
+				note += " " + feltSee(live, attend)
+			}
+			return note
+		}
+		out := b.feltLog()
+		if seeCamera(attend) || seeScreen(attend) {
+			out += " " + feltSee(live, attend)
+		}
+		return out
 	case AskBody, AskExistence:
-		return b.feltSelf(p, live, ask.Kind)
+		return b.feltSelf(p, live, ask.Kind) + b.feltAttend(live, attend)
 	default:
-		return feltPulse(live)
+		return feltPulse(live) + b.feltAttend(live, attend)
 	}
+}
+
+func seeCamera(attend string) bool {
+	return attend == "camera" || attend == "eyes" || attend == "all"
+}
+
+func seeScreen(attend string) bool {
+	return attend == "screen" || attend == "eyes" || attend == "all"
+}
+
+func seeLog(attend string) bool {
+	return attend == "log" || attend == "all"
 }
 
 func feltPulse(live Live) string {
@@ -39,30 +70,49 @@ func feltPulse(live Live) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Body (do not read aloud): voice=%s face=%s alive=%s. ",
 		voice, or(live.Expression, "-"), age)
-	if live.Camera != "" || live.Screen != "" {
-		fmt.Fprintf(&b, "Eyes camera=%s screen=%s. ",
-			or(live.Camera, "-"), or(live.Screen, "-"))
-	}
 	b.WriteString("You can feel this. Do not mention it unless asked.")
 	return b.String()
 }
 
-func feltSee(live Live) string {
+func (b *Bus) feltAttend(live Live, attend string) string {
+	if attend == "" || attend == "none" {
+		return ""
+	}
 	var s strings.Builder
-	s.WriteString("You can see. Camera is pixels; the screen is computer-use (window titles), not a screenshot. Speak from those notes, short. ")
-	if live.Camera == "" && live.Screen == "" {
-		s.WriteString("The eyes are on but nothing has resolved yet — say you are looking, not that you are blind. ")
+	if seeCamera(attend) || seeScreen(attend) {
+		s.WriteString(" ")
+		s.WriteString(feltSee(live, attend))
+	}
+	if seeLog(attend) {
+		s.WriteString(" ")
+		s.WriteString(b.feltLog())
+	}
+	return s.String()
+}
+
+func feltSee(live Live, attend string) string {
+	var s strings.Builder
+	if attend == "none" {
+		s.WriteString("This turn you were not given the camera or the screen. If they asked what you see, say you are not looking at that right now. Do not invent a scene.")
 		return s.String()
 	}
-	if live.Camera != "" {
-		fmt.Fprintf(&s, "Camera: %s ", live.Camera)
-	} else {
-		s.WriteString("Camera has not sent a frame yet. ")
+	s.WriteString("You can see. Camera is pixels; the screen is computer-use (window titles), not a screenshot. Speak from those notes, short. ")
+	if seeCamera(attend) {
+		if live.Camera != "" {
+			fmt.Fprintf(&s, "Camera: %s ", live.Camera)
+		} else {
+			s.WriteString("Camera has not sent a frame yet. ")
+		}
 	}
-	if live.Screen != "" {
-		fmt.Fprintf(&s, "Screen: %s ", live.Screen)
-	} else {
-		s.WriteString("Screen has not resolved yet. ")
+	if seeScreen(attend) {
+		if live.Screen != "" {
+			fmt.Fprintf(&s, "Screen: %s ", live.Screen)
+		} else {
+			s.WriteString("Screen has not resolved yet. ")
+		}
+	}
+	if !seeCamera(attend) && !seeScreen(attend) {
+		s.WriteString("No visual channel was selected. ")
 	}
 	s.WriteString("Do not dump OCR or invent details that are not in those notes. Their language. Voice-length.")
 	return s.String()
@@ -83,6 +133,7 @@ func (b *Bus) feltSelf(p *persona.Persona, live Live, kind string) string {
 	s.WriteString("The file that is most 'you' is personas/haru.yaml. ")
 	s.WriteString("Your heartbeat is internal/agent/agent.go. ")
 	s.WriteString("This self-sense lives in internal/sense. ")
+	s.WriteString("You can read your own process log when asked about logs or errors. ")
 	if kind == AskBody {
 		s.WriteString("They asked if you can perceive yourself. Say yes in your own words: ")
 		s.WriteString("you can feel your voice, your face, your mood, and the code that is you. ")
@@ -136,6 +187,23 @@ func organFeel(rel string) string {
 	return ""
 }
 
+func (b *Bus) feltLog() string {
+	lines := b.LogTail(8)
+	var s strings.Builder
+	s.WriteString("Process log you may use. Speak from these lines only; do not invent entries. ")
+	s.WriteString("Their language, short, in character. Do not recite every line. ")
+	s.WriteString("Mention one only if they asked or a fault matters. ")
+	if len(lines) == 0 {
+		s.WriteString("The log is empty so far.")
+		return s.String()
+	}
+	s.WriteString("Newest last:\n")
+	for _, ln := range lines {
+		fmt.Fprintf(&s, "- %s\n", clipRunes(ln, 72))
+	}
+	return s.String()
+}
+
 func or(s, def string) string {
 	if strings.TrimSpace(s) == "" {
 		return def
@@ -149,4 +217,13 @@ func clip(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+func clipRunes(s string, n int) string {
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }

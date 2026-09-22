@@ -24,10 +24,10 @@ type Eyes struct {
 // New builds a stopped pair. Start launches the goroutines.
 func New(opt Options) *Eyes {
 	if opt.Interval <= 0 {
-		opt.Interval = 2 * time.Second
+		opt.Interval = 10 * time.Second
 	}
 	if opt.Cooldown <= 0 {
-		opt.Cooldown = 8 * time.Second
+		opt.Cooldown = 10 * time.Second
 	}
 	return &Eyes{
 		opt:    opt,

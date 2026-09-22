@@ -48,6 +48,17 @@ func TestParse(t *testing.T) {
 	if j.WantLLM(0.55) {
 		t.Fatal("low need_llm should not launch LLM")
 	}
+	if j.Attend != "" {
+		t.Fatalf("missing attend should stay empty, got %q", j.Attend)
+	}
+	j = Parse("看看", map[string]jev.Answer{"attend": {Choice: "camera"}})
+	if j.Attend != "camera" {
+		t.Fatalf("attend %q", j.Attend)
+	}
+	j = Parse("看看", map[string]jev.Answer{"attend": {Choice: "nope"}})
+	if j.Attend != "" {
+		t.Fatalf("unknown attend should be dropped, got %q", j.Attend)
+	}
 }
 
 func TestDecideMode(t *testing.T) {
@@ -144,6 +155,7 @@ func TestJudgeTurnAgainstFakeServer(t *testing.T) {
 				"intent":       map[string]any{"type": "choice", "choice": "share_good"},
 				"self_emotion": map[string]any{"type": "choice", "choice": "joy"},
 				"mode":         map[string]any{"type": "choice", "choice": "celebrate"},
+				"attend":       map[string]any{"type": "choice", "choice": "none"},
 			},
 		})
 	}))
@@ -154,7 +166,7 @@ func TestJudgeTurnAgainstFakeServer(t *testing.T) {
 	mem := memory.New(8)
 	mem.Add(memory.Turn{Speaker: "assistant", Text: "welcome!"})
 	p.Reactions = map[string]string{"comfort": "先嫌一句，再帮忙"}
-	jd, err := JudgeTurn(context.Background(), jc, p, mem, "I love this place", "")
+	jd, err := JudgeTurn(context.Background(), jc, p, mem, "I love this place", "", Observe{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +179,10 @@ func TestJudgeTurnAgainstFakeServer(t *testing.T) {
 	if jd.NeedLLMP != 0.12 || jd.WantLLM(0) {
 		t.Fatalf("need_llm %+v", jd)
 	}
-	for _, q := range []string{"need_llm", "intent", "self_emotion", "mode"} {
+	if jd.Attend != "none" {
+		t.Fatalf("attend %q", jd.Attend)
+	}
+	for _, q := range []string{"need_llm", "intent", "self_emotion", "mode", "attend"} {
 		if _, ok := gotQuestions[q]; !ok {
 			t.Fatalf("turn judge must ask %s, got %v", q, gotQuestions)
 		}

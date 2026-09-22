@@ -76,7 +76,16 @@ type Judgment struct {
 	PersonaFitP  float64               `json:"persona_fit_p,omitempty"`
 	NeedLLMP     float64               `json:"need_llm"`
 	Confidence   float64               `json:"confidence,omitempty"`
+	Attend       string                `json:"attend,omitempty"`
 	Raw          map[string]jev.Answer `json:"-"`
+}
+
+// Observe is what she could look at this turn. Jev picks a channel;
+// it does not write the caption or the log.
+type Observe struct {
+	Camera string
+	Screen string
+	Log    []string
 }
 
 func scoreLevels() []string {
@@ -110,6 +119,20 @@ func modeCriteria(p *persona.Persona, planNote string) map[string]any {
 		m[mode] = def
 	}
 	return m
+}
+
+// AttendLabels is which observation, if any, the voice model may see this turn.
+var AttendLabels = map[string]string{
+	"none":   "Nothing extra. Ordinary chat. Do not show the camera, the screen, or the log.",
+	"camera": "The camera caption in state.observe.camera. They asked what she sees or who is there, or that scene matters to this utterance.",
+	"screen": "The screen note in state.observe.screen. They asked about the screen, or the window is what this utterance is about.",
+	"eyes":   "Both camera and screen. They asked what she can see, or both are relevant.",
+	"log":    "state.observe.log. They asked about her log, an error, or a fault she should know.",
+	"all":    "Camera, screen, and the log. They asked about her whole situation, or a fault and the scene both matter.",
+}
+
+var knownAttend = map[string]bool{
+	"none": true, "camera": true, "screen": true, "eyes": true, "log": true, "all": true,
 }
 
 // questions builds the one-shot Jev question set for a turn.
@@ -177,6 +200,19 @@ func questions(p *persona.Persona, withPersonaFit bool, planNote string) map[str
 				"direction, or anything the live voice model cannot do well " +
 				"alone. No for greetings, backchannels (嗯/哦/好/喂), small " +
 				"talk, or a reply the voice model can continue immediately.",
+		},
+		"attend": {
+			Type: "choice",
+			Instructions: "Which observation should the voice model see this turn? " +
+				"Read state.observe and section latest. " +
+				"Pick none for ordinary chat. " +
+				"Pick camera, screen, or eyes only when they asked what she sees, " +
+				"or the note is clearly what the utterance is about. " +
+				"Pick log only when they asked about her log, an error, or a fault. " +
+				"Pick all only when both the scene and the log matter. " +
+				"Empty observe fields are not a reason to pick that channel. " +
+				"Do not pick a channel just because a caption exists.",
+			Criteria: criteriaCopy(AttendLabels),
 		},
 	}
 	if p.Judge.Safety {
@@ -276,6 +312,9 @@ func Parse(userText string, ans map[string]jev.Answer) Judgment {
 	if a, ok := ans["need_llm"]; ok {
 		j.NeedLLMP = noulVal(a)
 	}
+	if a, ok := ans["attend"]; ok && knownAttend[a.Choice] {
+		j.Attend = a.Choice
+	}
 	j.Confidence = confidenceOf(ans)
 	return j
 }
@@ -319,7 +358,7 @@ func (j *Judgment) OffPersona(thresh float64) bool {
 // gateway exposes no user transcript; then Jev falls back to inferring
 // user state from the latest exchange in state.
 func JudgeTurn(ctx context.Context, client *jev.Client, p *persona.Persona,
-	mem *memory.Memory, userText, planNote string) (*Judgment, error) {
+	mem *memory.Memory, userText, planNote string, obs Observe) (*Judgment, error) {
 	latest := map[string]string{}
 	if t := userText; t != "" {
 		latest["user"] = t
@@ -339,11 +378,13 @@ func JudgeTurn(ctx context.Context, client *jev.Client, p *persona.Persona,
 			"reactions":    p.Reactions,
 			"taboos":       p.Taboos,
 		},
-		"recent": mem.Recent(6),
-		"latest": latest,
-		"plan":   planNote,
+		"recent":  mem.Recent(6),
+		"latest":  latest,
+		"plan":    planNote,
+		"observe": observeState(obs),
 		"note": "latest.user is the utterance to judge when present; " +
-			"otherwise infer the user's likely state from the latest exchange.",
+			"otherwise infer the user's likely state from the latest exchange. " +
+			"observe is what she could look at; attend chooses a channel, it does not rewrite it.",
 	}
 	res, err := client.Evaluate(ctx, state, questions(p, latest["assistant"] != "", planNote))
 	if err != nil {
@@ -351,6 +392,31 @@ func JudgeTurn(ctx context.Context, client *jev.Client, p *persona.Persona,
 	}
 	jd := Parse(userText, res.Answers)
 	return &jd, nil
+}
+
+func observeState(obs Observe) map[string]any {
+	logLines := obs.Log
+	if len(logLines) > 6 {
+		logLines = logLines[len(logLines)-6:]
+	}
+	clipped := make([]string, 0, len(logLines))
+	for _, ln := range logLines {
+		clipped = append(clipped, clipObserve(ln, 80))
+	}
+	return map[string]any{
+		"camera": clipObserve(obs.Camera, 120),
+		"screen": clipObserve(obs.Screen, 120),
+		"log":    clipped,
+	}
+}
+
+func clipObserve(s string, n int) string {
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // DecideMode maps a judgment to a steering mode.

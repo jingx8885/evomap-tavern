@@ -85,28 +85,17 @@ func Build(p *persona.Persona, mode string, j *judge.Judgment,
 
 // BuildWithScene is the character-facing steering note: short, current-scene,
 // and centered on her own emotion rather than the user's emotion alone.
+// Persona bible stays in BaseInstructions; repeating it here blows the
+// developer-channel 500-token cap and the gateway drops the note.
 func BuildWithScene(p *persona.Persona, mode string, j *judge.Judgment,
 	a memory.Affect, planNote string, cue SceneCue) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Stay in character as %s. ", p.Name)
-	if p.Style != "" {
-		fmt.Fprintf(&b, "Style: %s. ", p.Style)
-	}
-	if core := p.CharacterDirective(); core != "" {
-		b.WriteString(core)
-	}
-	if len(p.Taboos) > 0 {
-		fmt.Fprintf(&b, "Never: %s. ", strings.Join(p.Taboos, "; "))
-	}
-	b.WriteString(p.CatchphraseDirective())
-	b.WriteString(p.ExampleDirective())
-	b.WriteString("Scene changes how you handle this turn, not who you are. ")
-	fmt.Fprintf(&b, "Scene: %s - %s ", mode, modeDirective(p, mode))
+	fmt.Fprintf(&b, "Scene %s: %s ", mode, modeDirective(p, mode))
 	if j != nil && j.SelfEmotion != "" {
-		fmt.Fprintf(&b, "Her own feeling this turn: %s. Let it color the reply without naming the label. ",
-			j.SelfEmotion)
+		fmt.Fprintf(&b, "Her feeling: %s. ", j.SelfEmotion)
 	}
-	fmt.Fprintf(&b, "User state: emotion=%s valence=%.2f arousal=%.2f engagement=%.2f",
+	fmt.Fprintf(&b, "User: emotion=%s valence=%.2f arousal=%.2f engagement=%.2f",
 		j.Emotion, a.Valence, a.Arousal, j.Engagement)
 	if j != nil && j.Intent != "" {
 		fmt.Fprintf(&b, " intent=%s", j.Intent)
@@ -116,15 +105,14 @@ func BuildWithScene(p *persona.Persona, mode string, j *judge.Judgment,
 		b.WriteString(cueText + " ")
 	}
 	if planNote != "" && mode != "de_escalate" && mode != "comfort" && mode != "safety" {
-		fmt.Fprintf(&b, "Long-term thread: %s ", planNote)
+		fmt.Fprintf(&b, "Thread: %s ", planNote)
 	}
 	if j != nil && j.OffPersona(p.Judge.FitThresh) {
-		b.WriteString("Your last reply drifted off this persona. Snap back to Style and the reaction above without announcing it. ")
+		b.WriteString("Last reply drifted; snap back without announcing it. ")
 	}
 	b.WriteString("Show this scene in your voice on this turn, not later. ")
 	b.WriteString("Do not greet, re-introduce yourself, or say your name. ")
-	b.WriteString("Do not read labels aloud (Scene, User state, Relationship, 名字). ")
-	b.WriteString("Reply in the user's language; keep it short enough for voice.")
+	b.WriteString("Do not read labels aloud. Reply in the user's language; keep it short enough for voice.")
 	return b.String()
 }
 

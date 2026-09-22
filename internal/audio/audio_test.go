@@ -62,6 +62,62 @@ func TestUpsampleS16LE2x(t *testing.T) {
 			t.Fatalf("ramp[%d]=%d want %d", i, v, w)
 		}
 	}
+
+	// The following sample belongs to the next block. The midpoint at the
+	// boundary has to use it; holding the last sample is a click every block.
+	continued := make([]byte, 6)
+	binary.LittleEndian.PutUint16(continued[0:], uint16(int16(0)))
+	binary.LittleEndian.PutUint16(continued[2:], uint16(int16(10)))
+	binary.LittleEndian.PutUint16(continued[4:], uint16(int16(20)))
+	dst := make([]byte, 8)
+	UpsampleS16LE2xFrame(dst, continued, 2)
+	want = []int16{0, 5, 10, 15}
+	for i, w := range want {
+		if v := int16(binary.LittleEndian.Uint16(dst[i*2:])); v != w {
+			t.Fatalf("continued[%d]=%d want %d", i, v, w)
+		}
+	}
+}
+
+func TestPlaybackCueDoesNotReprimeAcrossAShortGap(t *testing.T) {
+	const (
+		frame = 100
+		prime = 400
+	)
+	var cue playbackCue
+	t0 := time.Unix(0, 0)
+	if cue.ready(prime-1, false, t0, frame, prime) {
+		t.Fatal("started before the first utterance was primed")
+	}
+	if !cue.ready(prime, false, t0, frame, prime) {
+		t.Fatal("primed utterance should play")
+	}
+
+	drained := t0.Add(time.Second)
+	if !cue.ready(0, true, drained.Add(time.Hour), frame, prime) {
+		t.Fatal("a playing device should stay armed")
+	}
+	if !cue.ready(0, false, drained, frame, prime) {
+		t.Fatal("a just-drained device should stay armed")
+	}
+	if !cue.ready(frame, false, drained.Add(40*time.Millisecond), frame, prime) {
+		t.Fatal("audio inside the idle window should play without another prime")
+	}
+
+	again := drained.Add(80 * time.Millisecond)
+	if !cue.ready(0, false, again, frame, prime) {
+		t.Fatal("second drain should stay armed")
+	}
+	idle := again.Add(playbackIdleReset)
+	if cue.ready(0, false, idle, frame, prime) {
+		t.Fatal("a long idle should require a new prime")
+	}
+	if cue.ready(frame, false, idle.Add(time.Millisecond), frame, prime) {
+		t.Fatal("one frame after a long idle should wait for a full prime")
+	}
+	if !cue.ready(prime, false, idle.Add(2*time.Millisecond), frame, prime) {
+		t.Fatal("a full prime after idle should play")
+	}
 }
 
 func TestWriteWAV(t *testing.T) {
@@ -285,6 +341,26 @@ func TestMicPickScorePrefersArray(t *testing.T) {
 	}
 	if arr <= virt {
 		t.Fatalf("intel array %v should beat virtual %v", arr, virt)
+	}
+}
+
+func TestOfferFrameDropsOldestWhenFull(t *testing.T) {
+	out := make(chan []byte, 2)
+	stop := make(chan struct{})
+	if !OfferFrame(out, stop, []byte{1}) || !OfferFrame(out, stop, []byte{2}) {
+		t.Fatal("queue should accept the first frames")
+	}
+	if !OfferFrame(out, stop, []byte{3}) {
+		t.Fatal("a full queue should keep the newest frame")
+	}
+	a := <-out
+	b := <-out
+	if a[0] != 2 || b[0] != 3 {
+		t.Fatalf("got %v %v, want the live tail 2 then 3", a, b)
+	}
+	close(stop)
+	if OfferFrame(out, stop, []byte{4}) {
+		t.Fatal("closed capture should not enqueue")
 	}
 }
 

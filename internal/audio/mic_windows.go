@@ -180,7 +180,7 @@ func openWinmmMic(devID uint32, rate uint32, channels uint16) (<-chan []byte, fu
 		return nil, func() {}, fmt.Errorf("waveInStart: %v", callErr)
 	}
 
-	out := make(chan []byte, 64)
+	out := make(chan []byte, 16)
 	stopCh := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -247,7 +247,7 @@ func waveInRequeue(hwi uintptr, hdr *waveHdr) error {
 	return nil
 }
 
-func winmmCaptureLoop(hwi uintptr, bufs []winmmCapBuf, out chan<- []byte, stop <-chan struct{}, event windows.Handle, rate, channels, frameBytes int) {
+func winmmCaptureLoop(hwi uintptr, bufs []winmmCapBuf, out chan []byte, stop <-chan struct{}, event windows.Handle, rate, channels, frameBytes int) {
 	acc := make([]byte, 0, frameBytes*2)
 	ulawAcc := make([]byte, 0, PCMUFrameBytes*2)
 	align := channels * 2
@@ -286,10 +286,8 @@ func winmmCaptureLoop(hwi uintptr, bufs []winmmCapBuf, out chan<- []byte, stop <
 					frame := make([]byte, PCMUFrameBytes)
 					copy(frame, ulawAcc[:PCMUFrameBytes])
 					ulawAcc = ulawAcc[PCMUFrameBytes:]
-					select {
-					case <-stop:
+					if !OfferFrame(out, stop, frame) {
 						return
-					case out <- frame:
 					}
 				}
 			}

@@ -26,6 +26,8 @@ func TestParseAsk(t *testing.T) {
 		{"你能看见我吗", AskSee, ""},
 		{"屏幕上有什么", AskSee, ""},
 		{"can you see me", AskSee, ""},
+		{"看看你的日志", AskLog, ""},
+		{"你能看到自己的日志吗", AskLog, ""},
 	}
 	for _, c := range cases {
 		got := ParseAsk(c.in)
@@ -114,7 +116,7 @@ func TestReadBodyAndFelt(t *testing.T) {
 	}
 
 	off := &persona.Persona{Name: "小春"}
-	if b.Felt(off, Ask{Kind: AskBody}) != "" {
+	if b.Felt(off, Ask{Kind: AskBody}, "") != "" {
 		t.Fatal("sense disabled should not feel")
 	}
 	p := &persona.Persona{Name: "小春", Voice: "maple", Sense: persona.SenseConfig{Enabled: true}}
@@ -124,29 +126,62 @@ func TestReadBodyAndFelt(t *testing.T) {
 		l.Expression = "F01"
 		l.StartedAt = time.Now().Add(-2 * time.Second)
 	})
-	pulse := b.Felt(p, Ask{})
+	pulse := b.Felt(p, Ask{}, "")
 	if !strings.Contains(pulse, "Body") || !strings.Contains(pulse, "Do not mention") {
 		t.Fatalf("pulse %q", pulse)
 	}
-	self := b.Felt(p, Ask{Kind: AskBody})
+	self := b.Felt(p, Ask{Kind: AskBody}, "")
 	if !strings.Contains(self, "You can feel yourself") {
 		t.Fatalf("self %q", self)
 	}
 	if strings.Contains(self, "package agent") {
 		t.Fatal("body ask should not dump source")
 	}
-	look := b.Felt(p, Ask{Kind: AskFile, File: "internal/agent/agent.go"})
+	look := b.Felt(p, Ask{Kind: AskFile, File: "internal/agent/agent.go"}, "")
 	if !strings.Contains(look, "package agent") {
 		t.Fatalf("look missing excerpt: %q", look)
 	}
 	b.Set(func(l *Live) { l.Camera = "对面有个人"; l.Screen = "在写代码" })
-	see := b.Felt(p, Ask{Kind: AskSee})
+	see := b.Felt(p, Ask{Kind: AskSee}, "")
 	if !strings.Contains(see, "对面有个人") || !strings.Contains(see, "在写代码") {
 		t.Fatalf("see %q", see)
 	}
-	pulse = b.Felt(p, Ask{})
-	if !strings.Contains(pulse, "Eyes") {
-		t.Fatalf("pulse missing eyes: %q", pulse)
+	pulse = b.Felt(p, Ask{}, "none")
+	if strings.Contains(pulse, "对面有个人") || strings.Contains(pulse, "在写代码") {
+		t.Fatalf("ordinary turn must not include eyes until Jev asks: %q", pulse)
+	}
+	shown := b.Felt(p, Ask{}, "camera")
+	if !strings.Contains(shown, "对面有个人") || strings.Contains(shown, "在写代码") {
+		t.Fatalf("camera attend should be camera only: %q", shown)
+	}
+}
+
+func TestJournalDropsRoutineLines(t *testing.T) {
+	root := t.TempDir()
+	writeFakeRoot(t, root)
+	b, err := Open(Options{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	b.Note("[livevoice] uplink: frames=100 max_rms=0.2")
+	b.Note("[user~] 小春")
+	b.Note("[steer] mode=continue")
+	b.Note("[eye] camera: 对面有个人")
+	b.Note("[judge] emotion=joy intent=chat")
+	b.Note("[steer] failed: boom")
+	b.Note("[eye] camera vlm: timeout")
+	b.Note("[judge] skipped: context canceled")
+	got := strings.Join(b.LogTail(10), "\n")
+	for _, keep := range []string{"[steer] failed: boom", "[eye] camera vlm: timeout", "[judge] skipped:"} {
+		if !strings.Contains(got, keep) {
+			t.Fatalf("missing %q in %q", keep, got)
+		}
+	}
+	for _, drop := range []string{"uplink:", "[user~]", "mode=continue", "对面有个人", "emotion=joy"} {
+		if strings.Contains(got, drop) {
+			t.Fatalf("routine line leaked %q in %q", drop, got)
+		}
 	}
 }
 

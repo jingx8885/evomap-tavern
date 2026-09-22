@@ -97,3 +97,17 @@ func TestIsTranscriptEvent(t *testing.T) {
 		t.Fatal("audio append is not transcript")
 	}
 }
+
+func TestClipUplinkQueueKeepsTheLiveTail(t *testing.T) {
+	var q [][]byte
+	for i := 0; i < 20; i++ {
+		q = append(q, []byte{byte(i)})
+		q, _ = clipUplinkQueue(q)
+	}
+	if len(q) != uplinkLiveFrames {
+		t.Fatalf("len %d", len(q))
+	}
+	if q[0][0] != 14 || q[len(q)-1][0] != 19 {
+		t.Fatalf("kept %v..%v, want the newest 120ms", q[0][0], q[len(q)-1][0])
+	}
+}
