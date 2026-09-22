@@ -247,7 +247,7 @@ func TestJudgeTurnAgainstFakeServer(t *testing.T) {
 	}
 	actQ, _ := gotQuestions["act"].(map[string]any)
 	actCrit, _ := actQ["criteria"].(map[string]any)
-	for _, id := range []string{"reflect", "look", "camera", "screen", "codex", "computer_use", "image", "video", "speech", "song", "picture", "watch", "listen"} {
+	for _, id := range []string{"reflect", "look", "camera", "screen", "shot", "codex", "computer_use", "image", "video", "speech", "song", "picture", "watch", "listen"} {
 		if _, ok := actCrit[id]; !ok {
 			t.Fatalf("act must offer %s: %v", id, actCrit)
 		}

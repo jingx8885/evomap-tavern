@@ -66,7 +66,7 @@ func NormalizeFrame(source string, raw []byte, maxEdge int) (Frame, error) {
 }
 
 func maxEdgeFor(source string) int {
-	if source == SourceScreen {
+	if source == SourceScreen || source == SourceShot {
 		return maxScreenEdge
 	}
 	return maxCameraEdge

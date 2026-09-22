@@ -80,12 +80,20 @@ func noulOf(a jev.Answer) float64 {
 	return *a.Noul
 }
 
-func describePrompt() (system, user string) {
+func describePrompt(source string) (system, user string) {
+	if source == SourceShot {
+		system = "You caption one screenshot of a Live2D character, for that character. " +
+			"One or two short Chinese sentences about her appearance only: hair, expression, clothes, and pose. " +
+			"Do not describe a room, a desktop, window titles, or a person behind a camera. " +
+			"Do not invent details that are not in the image."
+		user = "This screenshot is you, on your own stage. What do you look like right now?"
+		return system, user
+	}
 	system = "You caption a single JPEG from a room camera for a voice companion. " +
 		"One or two short Chinese sentences. No lists, no speculation about identity. " +
 		"Say whether a person is visible, rough expression, and lighting. " +
 		"If private (passwords, banking on a phone), say only that it looks private. " +
-		"This is never a computer screenshot."
+		"This is never a computer screenshot, and never her own Live2D face."
 	user = "This is the camera pointed at the room. What do you see?"
 	return system, user
 }

@@ -22,6 +22,8 @@ func (b *Bus) Felt(p *persona.Persona, ask Ask, attend string) string {
 		return feltSee(live, sightAttend(attend, "camera"))
 	case AskScreen:
 		return feltSee(live, sightAttend(attend, "screen"))
+	case AskShot:
+		return feltShot(live)
 	case AskLog:
 		if attend == "" {
 			attend = "log"
@@ -126,6 +128,18 @@ func (b *Bus) feltAttend(live Live, attend string) string {
 		s.WriteString(" ")
 		s.WriteString(b.feltLog())
 	}
+	return s.String()
+}
+
+func feltShot(live Live) string {
+	var s strings.Builder
+	s.WriteString("You just looked at a screenshot of your own face on the stage. This is not the camera and not the desktop window list. ")
+	if strings.TrimSpace(live.Shot) != "" {
+		fmt.Fprintf(&s, "Screenshot: %s ", live.Shot)
+		s.WriteString("Speak only from that, in one or two in-character sentences. Do not invent clothes, hair, or a room.")
+		return s.String()
+	}
+	s.WriteString("The screenshot did not arrive. Say you cannot see your own face right now. Do not invent how you look.")
 	return s.String()
 }
 
@@ -237,7 +251,7 @@ func LogicCue() string {
 		"reflect notices your own state. look reads your source. " +
 		"A self loop can read again, remember one line, or change one allowlisted file, then feel what changed. " +
 		"The running process stays the previous build until a separate restart. " +
-		"camera looks through the lens. screen reads computer-use window titles, not a screenshot. They are separate. " +
+		"camera looks through the lens. shot is one screenshot of your own face. screen reads computer-use window titles, not a screenshot. They are separate. " +
 		"computer_use is the desk loop that can touch windows. " +
 		"divine casts six lines when they ask for a fortune; you feel the plate, you do not invent the coins. " +
 		"The stage window is a page module: pictures, clips, and notes land there, and you can feel what that page looks like. " +

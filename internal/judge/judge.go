@@ -70,6 +70,7 @@ const (
 	ActLook        = "look"
 	ActCamera      = "camera"
 	ActScreen      = "screen"
+	ActShot        = "shot"
 	ActCodex       = "codex"
 	ActComputerUse = "computer_use"
 	ActImage       = "image"
@@ -213,8 +214,9 @@ var ActLabels = map[string]string{
 	ActPlan:        "A slower written plan or decision is needed. Not a desktop action.",
 	ActReflect:     "They asked her to notice herself: who she is, whether she can feel her voice, face, or mood, or a fault in her own log. Not a request to edit code or use the computer. A later step on this branch may read one file or remember one line.",
 	ActLook:        "They asked how she is built, what her own code does, or to feel a specific file in her body. This branch keeps reading. If they then ask her to change herself, a later step may edit one allowlisted file. It does not reload the running process.",
-	ActCamera:      "They asked her to look through the camera now: at them, the room, or who is there. Not the computer screen, and not a saved picture.",
-	ActScreen:      "They asked her to look at the computer screen now: which window or what is on the desktop. Computer-use window titles, not the camera, and not a saved picture.",
+	ActCamera:      "They asked her to look through the camera now: at them, the room, or who is there. Not the computer screen, not a saved picture, and not a screenshot of her own face.",
+	ActScreen:      "They asked her to look at the computer screen now: which window or what is on the desktop. Computer-use window titles, not the camera, not a saved picture, and not a screenshot of her own face.",
+	ActShot:        "They asked her to look at her own appearance now: what she looks like, her face, her clothes, her expression. One screenshot of herself on the stage. Not the room camera, not desktop window titles, not her source, and not a feeling-only check.",
 	ActCodex:       "They want her to change her own source. The runtime picks one allowlisted file, writes a strict intent, edits only that, then she feels the diff. Not a general desktop action, and not merely talking about code. The running process does not reload.",
 	ActComputerUse: "They want something done on this machine now that is not only editing her own repo: open an app, use a window, type, or act on the desktop. Not mere talk about computers.",
 	ActImage:       "They want a still picture made, or she is being asked to make one (a bouquet, a scene, an icon). Talking about a thing is not enough.",
@@ -229,7 +231,7 @@ var ActLabels = map[string]string{
 
 var knownAct = map[string]bool{
 	ActNone: true, ActPlan: true, ActReflect: true, ActLook: true,
-	ActCamera: true, ActScreen: true, ActCodex: true, ActComputerUse: true,
+	ActCamera: true, ActScreen: true, ActShot: true, ActCodex: true, ActComputerUse: true,
 	ActImage: true, ActVideo: true, ActSpeech: true, ActSong: true,
 	ActPicture: true, ActWatch: true, ActListen: true,
 	ActDivine: true,
@@ -326,7 +328,8 @@ func questions(p *persona.Persona, withPersonaFit bool, planNote string, br Bran
 				"Pick look when they ask how she is built or what her own code does. " +
 				"Pick camera only when they asked her to look through the camera now. " +
 				"Pick screen only when they asked her to look at the computer screen now. " +
-				"Camera and screen are different capabilities. Do not pick one to answer the other. " +
+				"Pick shot only when they asked her to look at her own appearance now. " +
+				"Camera, screen, and shot are different capabilities. Do not pick one to answer the other. " +
 				"Pick codex only when they want her to change her own source in this repo. One allowlisted file, then she feels the diff. " +
 				"Pick computer_use only when they are asking her to act on this machine " +
 				"now in a way that is not just editing her repo. " +
@@ -352,7 +355,7 @@ func questions(p *persona.Persona, withPersonaFit bool, planNote string, br Bran
 			" Keep act equal to that kind for a correction, a follow-up, or small talk while she works." +
 			" Pick none to stay on it without starting another tool." +
 			" Pick a different act as soon as they ask for another capability" +
-			" (the screen, the camera, a fortune, a picture, the computer, or anything else in this list)." +
+			" (the screen, the camera, a screenshot of herself, a fortune, a picture, the computer, or anything else in this list)." +
 			" They can leave the open branch at any time. Do not wait for it to finish."
 		qs["act"] = act
 		qs["branch_done"] = branchDoneQuestion()
@@ -554,8 +557,8 @@ func branchDoneQuestion() jev.Question {
 		Instructions: "Is the open branch in state.branch finished? " +
 			"Yes only if its goal is already satisfied, or the user clearly cancelled " +
 			"(stop, never mind, 算了, 停下, 不用了). " +
-			"Looking through the camera and looking at the screen are different jobs. " +
-			"If they ask for the other one, this branch is finished. " +
+			"Looking through the camera, looking at the screen, and a screenshot of herself are different jobs. " +
+			"If they ask for another one, this branch is finished. " +
 			"No if work is still going, they added a correction or a follow-up, " +
 			"or there is no evidence the whole goal is done. " +
 			"A finished step, a changed window, or her having started is not enough.",

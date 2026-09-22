@@ -1,6 +1,7 @@
-// Package eye is her outer sight. Camera and screen are separate looks.
-// Camera frames go through a VLM. The screen is not a screenshot: it is
-// computer-use observation (window titles classified by Jev).
+// Package eye is her outer sight. Camera, her own face, and the desktop
+// are separate looks. Camera frames and one screenshot of herself go
+// through a VLM. The screen is not a screenshot: it is computer-use
+// observation (window titles classified by Jev).
 package eye
 
 import (
@@ -14,6 +15,7 @@ import (
 const (
 	SourceCamera = "camera"
 	SourceScreen = "screen"
+	SourceShot   = "shot"
 )
 
 // Evaluator is the Jev surface the gate needs.
@@ -50,10 +52,11 @@ type Glimpse struct {
 	Noted   bool      `json:"noted,omitempty"`
 }
 
-// Sight is both eyes at once.
+// Sight is the looks she can take. Shot is a screenshot of her own face.
 type Sight struct {
 	Camera  Glimpse `json:"camera"`
 	Screen  Glimpse `json:"screen"`
+	Shot    Glimpse `json:"shot"`
 	Mention bool    `json:"mention,omitempty"`
 }
 
@@ -61,8 +64,9 @@ type Sight struct {
 type Options struct {
 	Camera  bool
 	Screen  bool
-	Grab    func(ctx context.Context) bool                // ask for one JPEG; false means do not wait
-	Observe func(ctx context.Context) (ScreenView, error) // computer-use glance; tests inject
+	Grab     func(ctx context.Context) bool                // ask the viewer for one camera JPEG; false means do not wait
+	GrabShot func(ctx context.Context) bool                // ask the viewer for one screenshot of her own face
+	Observe  func(ctx context.Context) (ScreenView, error) // computer-use glance; tests inject
 	Jev     Evaluator
 	LLM     Visioner
 	LogFn   func(string)

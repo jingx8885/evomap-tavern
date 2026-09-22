@@ -24,6 +24,8 @@ func TestParseAsk(t *testing.T) {
 		{"how do you work", AskCode, ""},
 		{"who are you", AskExistence, ""},
 		{"你能看见我吗", AskCamera, ""},
+		{"看自己样子", AskShot, ""},
+		{"你长什么样", AskShot, ""},
 		{"屏幕上有什么", AskScreen, ""},
 		{"can you see me", AskCamera, ""},
 		{"看看你的日志", AskLog, ""},
@@ -148,17 +150,21 @@ func TestReadBodyAndFelt(t *testing.T) {
 	if Writable("internal/judge/judge.go") || Writable("internal/agent/agent.go") || Writable("internal/desk/loop.go") || Writable("internal/livevoice/session.go") {
 		t.Fatal("safety latches must stay read-only")
 	}
-	b.Set(func(l *Live) { l.Camera = "对面有个人"; l.Screen = "在写代码" })
+	b.Set(func(l *Live) { l.Camera = "对面有个人"; l.Screen = "在写代码"; l.Shot = "短发，表情平静" })
 	camAsk := b.Felt(p, Ask{Kind: AskCamera}, "")
-	if !strings.Contains(camAsk, "对面有个人") || strings.Contains(camAsk, "在写代码") {
+	if !strings.Contains(camAsk, "对面有个人") || strings.Contains(camAsk, "在写代码") || strings.Contains(camAsk, "短发") {
 		t.Fatalf("camera ask %q", camAsk)
 	}
 	scrAsk := b.Felt(p, Ask{Kind: AskScreen}, "")
-	if !strings.Contains(scrAsk, "在写代码") || strings.Contains(scrAsk, "对面有个人") {
+	if !strings.Contains(scrAsk, "在写代码") || strings.Contains(scrAsk, "对面有个人") || strings.Contains(scrAsk, "短发") {
 		t.Fatalf("screen ask %q", scrAsk)
 	}
+	shotAsk := b.Felt(p, Ask{Kind: AskShot}, "")
+	if !strings.Contains(shotAsk, "短发") || strings.Contains(shotAsk, "对面有个人") || strings.Contains(shotAsk, "在写代码") {
+		t.Fatalf("shot ask %q", shotAsk)
+	}
 	pulse = b.Felt(p, Ask{}, "none")
-	if strings.Contains(pulse, "对面有个人") || strings.Contains(pulse, "在写代码") {
+	if strings.Contains(pulse, "对面有个人") || strings.Contains(pulse, "在写代码") || strings.Contains(pulse, "短发") {
 		t.Fatalf("ordinary turn must not include eyes until Jev asks: %q", pulse)
 	}
 	shown := b.Felt(p, Ask{}, "camera")

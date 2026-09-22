@@ -40,6 +40,7 @@ type Live struct {
 	LastAsk      string        `json:"last_ask,omitempty"`
 	Camera       string        `json:"camera,omitempty"`
 	Screen       string        `json:"screen,omitempty"`
+	Shot         string        `json:"shot,omitempty"`
 	LastFault    string        `json:"last_fault,omitempty"`
 	LastFaultAt  time.Time     `json:"last_fault_at,omitempty"`
 	MakeKind     string        `json:"make_kind,omitempty"`

@@ -31,7 +31,7 @@ func New(opt Options) *Eyes {
 func Start(ctx context.Context, opt Options) *Eyes {
 	_ = ctx
 	e := New(opt)
-	e.log("eyes up camera=%v screen=computer-use on demand", opt.Camera)
+	e.log("eyes up camera=%v screen=computer-use shot=self on demand", opt.Camera)
 	return e
 }
 
@@ -41,8 +41,8 @@ func (e *Eyes) Push(source, dataURL string) error {
 		return fmt.Errorf("eyes down")
 	}
 	source = normalizeSource(source)
-	if source != SourceCamera {
-		return fmt.Errorf("only camera frames are accepted; screen is computer-use")
+	if source != SourceCamera && source != SourceShot {
+		return fmt.Errorf("only camera frames and a self screenshot are accepted; screen is computer-use")
 	}
 	raw, err := DecodeDataURL(dataURL)
 	if err != nil {
@@ -72,11 +72,13 @@ func (e *Eyes) Snapshot() Sight {
 	return Sight{
 		Camera: e.seen[SourceCamera],
 		Screen: e.seen[SourceScreen],
+		Shot:   e.seen[SourceShot],
 	}
 }
 
-// Glance looks at one source once and leaves the other alone.
-// Camera captions one JPEG. Screen takes one computer-use window snapshot.
+// Glance looks at one source once and leaves the others alone.
+// Camera captions one room JPEG. Shot captions one screenshot of her face.
+// Screen takes one computer-use window snapshot.
 func (e *Eyes) Glance(ctx context.Context, source string) Glimpse {
 	if e == nil {
 		return Glimpse{}
@@ -84,6 +86,8 @@ func (e *Eyes) Glance(ctx context.Context, source string) Glimpse {
 	switch source {
 	case SourceCamera:
 		return e.glanceCamera(ctx)
+	case SourceShot:
+		return e.glanceShot(ctx)
 	case SourceScreen:
 		e.refreshScreen(ctx)
 		return e.Snapshot().Screen
@@ -96,7 +100,7 @@ func (e *Eyes) glanceCamera(ctx context.Context) Glimpse {
 	if e.opt.Grab != nil {
 		mark := time.Now()
 		if e.opt.Grab(ctx) {
-			e.waitCamera(ctx, mark, 1200*time.Millisecond)
+			e.waitFrame(ctx, SourceCamera, mark, 1200*time.Millisecond)
 		}
 	}
 	e.mu.Lock()
@@ -128,11 +132,30 @@ func (e *Eyes) glanceCamera(ctx context.Context) Glimpse {
 	return e.Snapshot().Camera
 }
 
-func (e *Eyes) waitCamera(ctx context.Context, after time.Time, d time.Duration) {
+func (e *Eyes) glanceShot(ctx context.Context) Glimpse {
+	if e.opt.GrabShot != nil {
+		mark := time.Now()
+		if e.opt.GrabShot(ctx) {
+			e.waitFrame(ctx, SourceShot, mark, 1200*time.Millisecond)
+		}
+	}
+	e.mu.Lock()
+	frame := e.latest[SourceShot]
+	e.mu.Unlock()
+	if len(frame.JPEG) == 0 {
+		e.log("shot: no frame")
+		return Glimpse{Source: SourceShot}
+	}
+	e.describe(ctx, frame, true)
+	e.emit(e.Snapshot())
+	return e.Snapshot().Shot
+}
+
+func (e *Eyes) waitFrame(ctx context.Context, source string, after time.Time, d time.Duration) {
 	deadline := time.Now().Add(d)
 	for {
 		e.mu.Lock()
-		at := e.latest[SourceCamera].At
+		at := e.latest[source].At
 		e.mu.Unlock()
 		if !at.IsZero() && !at.Before(after) {
 			return
@@ -184,7 +207,7 @@ func (e *Eyes) describe(ctx context.Context, f Frame, mention bool) {
 	if e.opt.LLM == nil || len(f.JPEG) == 0 {
 		return
 	}
-	sys, user := describePrompt()
+	sys, user := describePrompt(f.Source)
 	text, err := e.opt.LLM.ChatVision(ctx, sys, user, f.JPEG)
 	if err != nil {
 		e.log("%s vlm: %v", f.Source, err)
@@ -211,7 +234,7 @@ func (e *Eyes) emit(s Sight) {
 	if e.opt.OnSight == nil {
 		return
 	}
-	if s.Camera.Noted || s.Screen.Noted {
+	if s.Camera.Noted || s.Screen.Noted || s.Shot.Noted {
 		s.Mention = true
 	}
 	e.opt.OnSight(s)
@@ -228,6 +251,8 @@ func normalizeSource(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case SourceCamera, "cam", "webcam":
 		return SourceCamera
+	case SourceShot, "screenshot", "self":
+		return SourceShot
 	default:
 		return ""
 	}
