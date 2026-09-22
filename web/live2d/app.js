@@ -313,17 +313,34 @@
     }
   }
 
+  const phoneQuery = window.matchMedia("(max-width: 820px), (max-height: 500px) and (max-width: 1024px)");
+
+  function phoneLayout() {
+    return phoneQuery.matches;
+  }
+
   function layoutModel() {
     if (!model || !app) return;
     const w = app.renderer.width;
     const h = app.renderer.height;
+    model.anchor.set(0.5, 0);
+    model.scale.set(1);
+    if (phoneLayout()) {
+      document.body.classList.add("phone");
+      const mw = Math.max(model.width, 1);
+      const mh = Math.max(model.height, 1);
+      const scale = Math.min((w * 1.28) / mw, (h * 1.18) / mh);
+      model.scale.set(scale);
+      model.x = w * 0.5;
+      model.y = h * -0.02;
+      return;
+    }
+    document.body.classList.remove("phone");
     const rail = document.getElementById("rail");
     const hudBox = document.getElementById("hud");
     const insetL = hudBox ? hudBox.getBoundingClientRect().width + 36 : 300;
     const insetR = rail ? rail.getBoundingClientRect().width + 36 : 420;
     const usable = Math.max(240, w - insetL - insetR);
-    model.anchor.set(0.5, 0);
-    model.scale.set(1);
     const scale = Math.min((usable * 0.92) / Math.max(model.width, 1), (h * 1.22) / Math.max(model.height, 1));
     model.scale.set(scale);
     model.x = insetL + usable * 0.5;
@@ -1028,6 +1045,12 @@
     layoutModel();
     hookModelUpdate();
     window.addEventListener("resize", layoutModel);
+    if (typeof phoneQuery.addEventListener === "function") {
+      phoneQuery.addEventListener("change", layoutModel);
+    }
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", layoutModel);
+    }
     model.on("hit", (areas) => {
       if (areas.includes("HitArea2") || areas.includes("HitAreaBody") || areas.includes("Body")) {
         model.motion("TapBody");
