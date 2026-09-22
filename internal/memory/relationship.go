@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -29,10 +28,10 @@ type Relationship struct {
 	Trust        float64   `json:"trust"`
 	Warmth       float64   `json:"warmth"`
 	Tension      float64   `json:"tension"`
-	OpenLoops    []string  `json:"open_loops,omitempty"`
-	SharedEvents []string  `json:"shared_events,omitempty"`
-	Promises     []string  `json:"promises,omitempty"`
-	InsideJokes  []string  `json:"inside_jokes,omitempty"`
+	OpenLoops    Lines     `json:"open_loops,omitempty"`
+	SharedEvents Lines     `json:"shared_events,omitempty"`
+	Promises     Lines     `json:"promises,omitempty"`
+	InsideJokes  Lines     `json:"inside_jokes,omitempty"`
 	LastEvent    string    `json:"last_event,omitempty"`
 	LastTopic    string    `json:"last_topic,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -48,9 +47,10 @@ type RelationshipCue struct {
 
 // RelationshipStore keeps relationship memory on disk so she survives reboots.
 type RelationshipStore struct {
-	mu   sync.Mutex
-	path string
-	rel  Relationship
+	mu      sync.Mutex
+	path    string
+	rel     Relationship
+	folding bool
 }
 
 // NewRelationshipStore opens (or creates) a durable relationship file.
@@ -104,10 +104,10 @@ func normalizeRelationship(r Relationship) Relationship {
 	r.Trust = clamp01(r.Trust)
 	r.Warmth = clamp01(r.Warmth)
 	r.Tension = clamp01(r.Tension)
-	r.OpenLoops = uniqueTail(r.OpenLoops, 8)
-	r.SharedEvents = uniqueTail(r.SharedEvents, 8)
-	r.Promises = uniqueTail(r.Promises, 8)
-	r.InsideJokes = uniqueTail(r.InsideJokes, 6)
+	r.OpenLoops = normalizeLines(r.OpenLoops, 8)
+	r.SharedEvents = normalizeLines(r.SharedEvents, 8)
+	r.Promises = normalizeLines(r.Promises, 8)
+	r.InsideJokes = normalizeLines(r.InsideJokes, 6)
 	return r
 }
 
@@ -121,15 +121,60 @@ func (s *RelationshipStore) Snapshot() Relationship {
 	return cloneRelationship(s.rel)
 }
 
-// Cue returns the voice-facing scene cue without dumping private notes.
+// Cue returns the strongest live lines, for the face and for logs.
 func (s *RelationshipStore) Cue() RelationshipCue {
+	return s.Recall("")
+}
+
+// Recall picks the few lines that belong to this utterance. Overlap is
+// character bigrams plus shared content words. The ledger is a few dozen
+// gists, so a vector index would retrieve the same raw text more slowly.
+func (s *RelationshipStore) Recall(query string) RelationshipCue {
 	r := s.Snapshot()
+	now := time.Now()
 	return RelationshipCue{
 		Stage:        r.Stage,
-		Summary:      summarizeRelationship(r),
-		OpenLoops:    append([]string(nil), r.OpenLoops...),
-		SharedEvents: append([]string(nil), r.SharedEvents...),
+		Summary:      summarizeRelationship(r, query, now),
+		OpenLoops:    pick(r.OpenLoops, query, now, 2),
+		SharedEvents: pick(r.SharedEvents, query, now, 2),
 	}
+}
+
+// ForJudge is a short list of live gists for the keep question.
+func (s *RelationshipStore) ForJudge() []string {
+	if s == nil {
+		return nil
+	}
+	r := s.Snapshot()
+	now := time.Now()
+	type item struct {
+		text string
+		w    float64
+	}
+	var all []item
+	for _, list := range []Lines{r.OpenLoops, r.Promises, r.SharedEvents, r.InsideJokes} {
+		for _, ln := range list {
+			if ln.Status == lineClosed || strings.TrimSpace(ln.Text) == "" {
+				continue
+			}
+			all = append(all, item{ln.Text, effectiveWeight(ln, now)})
+		}
+	}
+	for i := 1; i < len(all); i++ {
+		j := i
+		for j > 0 && all[j].w > all[j-1].w {
+			all[j], all[j-1] = all[j-1], all[j]
+			j--
+		}
+	}
+	if len(all) > 8 {
+		all = all[:8]
+	}
+	out := make([]string, len(all))
+	for i, it := range all {
+		out[i] = it.text
+	}
+	return out
 }
 
 // ObserveTurn folds a judged turn into the persistent relationship.
@@ -142,10 +187,8 @@ func (s *RelationshipStore) ObserveTurn(personaName, userText, assistantText str
 	defer s.mu.Unlock()
 
 	r := normalizeRelationship(s.rel)
-	r.UpdatedAt = time.Now()
-	if t := strings.TrimSpace(userText); t != "" {
-		r.LastTopic = t
-	}
+	now := time.Now()
+	r.UpdatedAt = now
 
 	// Relationship grows slowly; big jumps feel fake and robotic.
 	delta := 0.0
@@ -188,31 +231,15 @@ func (s *RelationshipStore) ObserveTurn(personaName, userText, assistantText str
 		r.Tension = clamp01(r.Tension - 0.015)
 	}
 
-	// Keep a tiny, human-sized memory of what happened together.
-	if t := strings.TrimSpace(userText); t != "" {
-		r.SharedEvents = appendUnique(r.SharedEvents, "user: "+clipText(t, 48), 8)
+	// Numbers move every turn. Text is a gist, and only when the
+	// utterance is actually a promise, a loop, a joke, or a mood shift.
+	// Safety does not write a quote of the distress into the ledger.
+	settle(&r, userText, now)
+	if mode != "safety" {
+		seed(&r, userText, mode, now)
 	}
-	if t := strings.TrimSpace(assistantText); t != "" {
-		r.SharedEvents = appendUnique(r.SharedEvents, pLabel(personaName)+": "+clipText(t, 48), 8)
-	}
-	if mode == "celebrate" && strings.TrimSpace(userText) != "" {
-		r.SharedEvents = appendUnique(r.SharedEvents, "一起庆祝: "+clipText(userText, 48), 8)
-	}
-	if mode == "comfort" && strings.TrimSpace(userText) != "" {
-		r.SharedEvents = appendUnique(r.SharedEvents, "一起扛过: "+clipText(userText, 48), 8)
-	}
-	if mode == "de_escalate" && strings.TrimSpace(userText) != "" {
-		r.SharedEvents = appendUnique(r.SharedEvents, "有点别扭: "+clipText(userText, 48), 8)
-	}
-
-	for _, line := range extractLoops(userText) {
-		r.OpenLoops = appendUnique(r.OpenLoops, line, 8)
-	}
-	for _, line := range extractPromises(userText) {
-		r.Promises = appendUnique(r.Promises, line, 8)
-	}
-	for _, line := range extractJokes(userText) {
-		r.InsideJokes = appendUnique(r.InsideJokes, line, 6)
+	if topic := topicOf(userText); topic != "" {
+		r.LastTopic = topic
 	}
 
 	r.Stage = stageForBond(r.Bond, r.Trust, r.Warmth)
@@ -238,26 +265,26 @@ func (s *RelationshipStore) saveLocked() error {
 
 func cloneRelationship(r Relationship) Relationship {
 	out := r
-	out.OpenLoops = append([]string(nil), r.OpenLoops...)
-	out.SharedEvents = append([]string(nil), r.SharedEvents...)
-	out.Promises = append([]string(nil), r.Promises...)
-	out.InsideJokes = append([]string(nil), r.InsideJokes...)
+	out.OpenLoops = copyLines(r.OpenLoops)
+	out.SharedEvents = copyLines(r.SharedEvents)
+	out.Promises = copyLines(r.Promises)
+	out.InsideJokes = copyLines(r.InsideJokes)
 	return out
 }
 
-func summarizeRelationship(r Relationship) string {
+func summarizeRelationship(r Relationship, query string, now time.Time) string {
 	var parts []string
-	if len(r.OpenLoops) > 0 {
-		parts = append(parts, "还记着: "+strings.Join(tail(r.OpenLoops, 2), " / "))
+	if xs := pick(r.OpenLoops, query, now, 2); len(xs) > 0 {
+		parts = append(parts, "还记着: "+strings.Join(xs, " / "))
 	}
-	if len(r.SharedEvents) > 0 {
-		parts = append(parts, "一起经历过: "+strings.Join(tail(r.SharedEvents, 2), " / "))
+	if xs := pick(r.SharedEvents, query, now, 2); len(xs) > 0 {
+		parts = append(parts, "一起经历过: "+strings.Join(xs, " / "))
 	}
-	if len(r.InsideJokes) > 0 {
-		parts = append(parts, "内部梗: "+strings.Join(tail(r.InsideJokes, 1), " / "))
+	if xs := pick(r.InsideJokes, query, now, 1); len(xs) > 0 {
+		parts = append(parts, "内部梗: "+strings.Join(xs, " / "))
 	}
-	if len(r.Promises) > 0 {
-		parts = append(parts, "答应过: "+strings.Join(tail(r.Promises, 1), " / "))
+	if xs := pick(r.Promises, query, now, 1); len(xs) > 0 {
+		parts = append(parts, "答应过: "+strings.Join(xs, " / "))
 	}
 	if t := strings.TrimSpace(r.LastTopic); t != "" {
 		parts = append(parts, "上次说到: "+clipRunes(t, 24))
@@ -269,17 +296,6 @@ func summarizeRelationship(r Relationship) string {
 		return "现在还在彼此试探，像刚认识的同桌"
 	}
 	return strings.Join(parts, "；")
-}
-
-func pLabel(name string) string {
-	switch strings.TrimSpace(name) {
-	case "小春":
-		return "小春"
-	case "明日香":
-		return "明日香"
-	default:
-		return "她"
-	}
 }
 
 func modeLabel(mode string) string {
@@ -314,73 +330,6 @@ func stageForBond(bond, trust, warmth float64) string {
 	}
 }
 
-var (
-	loopRe = regexp.MustCompile(`(还没|没有|忘了|待办|下次|回头|之后|以后|晚点|明天|周末|截止|ddl|todo|promise|答应|记得)`)
-	jokeRe = regexp.MustCompile(`(笑死|哈哈|草|梗|外号|绰号|笨蛋|真是的)`)
-)
-
-func extractLoops(text string) []string {
-	t := strings.TrimSpace(text)
-	if t == "" || len(t) < 2 || !loopRe.MatchString(t) {
-		return nil
-	}
-	return []string{clipText(t, 64)}
-}
-
-func extractPromises(text string) []string {
-	t := strings.TrimSpace(text)
-	if t == "" {
-		return nil
-	}
-	if strings.Contains(t, "答应") || strings.Contains(t, "下次") || strings.Contains(t, "明天") || strings.Contains(t, "保证") {
-		return []string{clipText(t, 64)}
-	}
-	return nil
-}
-
-func extractJokes(text string) []string {
-	t := strings.TrimSpace(text)
-	if t == "" || !jokeRe.MatchString(t) {
-		return nil
-	}
-	return []string{clipText(t, 64)}
-}
-
-func appendUnique(list []string, item string, capN int) []string {
-	item = strings.TrimSpace(item)
-	if item == "" {
-		return list
-	}
-	for _, x := range list {
-		if x == item {
-			return list
-		}
-	}
-	list = append(list, item)
-	return tail(list, capN)
-}
-
-func uniqueTail(list []string, capN int) []string {
-	out := make([]string, 0, len(list))
-	seen := map[string]bool{}
-	for _, item := range list {
-		item = strings.TrimSpace(item)
-		if item == "" || seen[item] {
-			continue
-		}
-		seen[item] = true
-		out = append(out, item)
-	}
-	return tail(out, capN)
-}
-
-func tail(list []string, n int) []string {
-	if n <= 0 || len(list) <= n {
-		return append([]string(nil), list...)
-	}
-	return append([]string(nil), list[len(list)-n:]...)
-}
-
 func clamp01(v float64) float64 {
 	if v < 0 {
 		return 0
@@ -396,12 +345,4 @@ func lastNonEmpty(a, b string) string {
 		return a
 	}
 	return b
-}
-
-func clipText(s string, n int) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }

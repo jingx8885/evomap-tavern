@@ -80,22 +80,50 @@ func noulOf(a jev.Answer) float64 {
 	return *a.Noul
 }
 
-func describePrompt(source string) (system, user string) {
+func describePrompt(source, question string) (system, user string) {
+	q := strings.TrimSpace(question)
 	if source == SourceShot {
 		system = "You caption one screenshot of a Live2D character, for that character. " +
 			"One or two short Chinese sentences about her appearance only: hair, expression, clothes, and pose. " +
 			"Do not describe a room, a desktop, window titles, or a person behind a camera. " +
 			"Do not invent details that are not in the image."
 		user = "This screenshot is you, on your own stage. What do you look like right now?"
+		if AsksScene(q) {
+			user = "This screenshot is you, on your own stage. Answer only this question about your appearance. " +
+				"If the image does not show it, say you cannot tell. Do not invent. Question: " + clipQuestion(q)
+		}
 		return system, user
 	}
-	system = "You caption a single JPEG from a room camera for a voice companion. " +
+	system = "You look at a single JPEG from a room camera for a voice companion. " +
 		"One or two short Chinese sentences. No lists, no speculation about identity. " +
-		"Say whether a person is visible, rough expression, and lighting. " +
+		"If they asked a specific question, answer only that from this frame. Count only people you can see. " +
+		"If the frame does not show the answer, say you cannot tell. Do not invent. " +
+		"If they only asked you to look, say whether a person is visible, how many, rough expression, and lighting. " +
 		"If private (passwords, banking on a phone), say only that it looks private. " +
 		"This is never a computer screenshot, and never her own Live2D face."
 	user = "This is the camera pointed at the room. What do you see?"
+	if AsksScene(q) {
+		user = "This is the camera pointed at the room. Answer only this question from this frame: " + clipQuestion(q)
+	}
 	return system, user
+}
+
+func picturePrompt(question string) (system, user string) {
+	system = "You answer one question about a single computer screenshot for a voice companion. " +
+		"One or two short Chinese sentences. Count only people and objects you can see. " +
+		"If you cannot tell, say you cannot tell. Do not invent. " +
+		"This is the desktop, not a room camera, and not a Live2D face."
+	user = "Question: " + clipQuestion(question)
+	return system, user
+}
+
+func clipQuestion(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) <= 80 {
+		return s
+	}
+	return string(r[:80]) + "…"
 }
 
 func clipCaption(s string, n int) string {

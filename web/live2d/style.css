@@ -382,6 +382,15 @@ dd {
   font-size: 12px;
   padding-top: 2px;
 }
+.mem-kind.fading { opacity: 0.45; }
+.mem-weight {
+  display: block;
+  height: 2px;
+  margin-top: 4px;
+  background: var(--accent);
+  opacity: 0.75;
+}
+.mem-weight.fading { opacity: 0.35; }
 .mem-text {
   min-width: 0;
   word-break: break-word;

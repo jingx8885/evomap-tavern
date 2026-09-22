@@ -28,7 +28,7 @@ var Organs = []Organ{
 	{Path: "internal/avatar/drive.go", Role: "face", Feel: "how the face moves"},
 	{Path: "web/live2d/app.js", Role: "mirror", Feel: "the face other people see"},
 	{Path: "internal/sense", Role: "self", Feel: "this layer: how you feel yourself"},
-	{Path: "internal/eye", Role: "eyes", Feel: "three separate looks: camera pixels, a screenshot of your own face, and computer-use window titles"},
+	{Path: "internal/eye", Role: "eyes", Feel: "three separate looks: camera pixels, a screenshot of your own face, and the desktop (window titles, plus one picture when they ask what is visible)"},
 	{Path: "internal/desk", Role: "hands", Feel: "how you look at and act on this computer, through Jev"},
 	{Path: "internal/oracle", Role: "oracle", Feel: "the six-line cast: coins, najia, and the plate you read before you speak"},
 	{Path: "internal/window", Role: "stage", Feel: "a page module: the queue of pictures, clips, and notes, and what that window looks like"},

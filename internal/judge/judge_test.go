@@ -198,6 +198,7 @@ func TestJudgeTurnAgainstFakeServer(t *testing.T) {
 				"safety":       map[string]any{"type": "noul", "noul": 0.01},
 				"persona_fit":  map[string]any{"type": "noul", "noul": 0.9},
 				"need_llm":     map[string]any{"type": "noul", "noul": 0.12},
+				"keep":         map[string]any{"type": "noul", "noul": 0.2},
 				"intent":       map[string]any{"type": "choice", "choice": "share_good"},
 				"self_emotion": map[string]any{"type": "choice", "choice": "joy"},
 				"mode":         map[string]any{"type": "choice", "choice": "celebrate"},
@@ -232,7 +233,7 @@ func TestJudgeTurnAgainstFakeServer(t *testing.T) {
 	if jd.Act != ActNone || jd.Capability(0.55) != ActNone {
 		t.Fatalf("act %+v", jd)
 	}
-	for _, q := range []string{"need_llm", "intent", "self_emotion", "mode", "attend", "act"} {
+	for _, q := range []string{"need_llm", "keep", "intent", "self_emotion", "mode", "attend", "act"} {
 		if _, ok := gotQuestions[q]; !ok {
 			t.Fatalf("turn judge must ask %s, got %v", q, gotQuestions)
 		}

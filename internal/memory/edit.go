@@ -19,10 +19,13 @@ const (
 )
 
 // MemoryItem is one line she can be shown, edited, or forgotten.
+// Weight and Status move: a mention strengthens a line, silence thins it.
 type MemoryItem struct {
-	ID   string `json:"id"`
-	Kind string `json:"kind"`
-	Text string `json:"text"`
+	ID     string  `json:"id"`
+	Kind   string  `json:"kind"`
+	Text   string  `json:"text"`
+	Weight float64 `json:"weight,omitempty"`
+	Status string  `json:"status,omitempty"`
 }
 
 // MemoryView is the operator-facing snapshot of her durable memory.
@@ -93,8 +96,14 @@ func viewOf(r Relationship) MemoryView {
 		items = append(items, MemoryItem{ID: KindTopic, Kind: KindTopic, Text: t})
 	}
 	for _, kind := range []string{KindOpenLoop, KindPromise, KindShared, KindJoke} {
-		for _, text := range memoryLines(&r, kind) {
-			items = append(items, MemoryItem{ID: memoryID(kind, text), Kind: kind, Text: text})
+		for _, ln := range linesOf(&r, kind) {
+			if ln.Status == lineClosed || strings.TrimSpace(ln.Text) == "" {
+				continue
+			}
+			items = append(items, MemoryItem{
+				ID: memoryID(kind, ln.Text), Kind: kind, Text: ln.Text,
+				Weight: ln.Weight, Status: ln.Status,
+			})
 		}
 	}
 	return MemoryView{
@@ -104,7 +113,7 @@ func viewOf(r Relationship) MemoryView {
 		Trust:     r.Trust,
 		Warmth:    r.Warmth,
 		Tension:   r.Tension,
-		Summary:   summarizeRelationship(r),
+		Summary:   summarizeRelationship(r, "", time.Now()),
 		LastEvent: r.LastEvent,
 		UpdatedAt: r.UpdatedAt,
 		Items:     items,
@@ -133,17 +142,18 @@ func addMemory(r *Relationship, kind, text string) error {
 		r.LastTopic = text
 		return nil
 	}
-	list := memoryLines(r, kind)
+	list := linesOf(r, kind)
 	if list == nil && !knownMemoryKind(kind) {
 		return ErrMemoryKind
 	}
-	if containsText(list, text) {
+	if lineContains(list, text) {
 		return ErrMemoryDuplicate
 	}
 	if len(list) >= memoryCap(kind) {
 		return ErrMemoryFull
 	}
-	return setMemoryLines(r, kind, append(append([]string{}, list...), text))
+	now := time.Now()
+	return setLines(r, kind, append(copyLines(list), Line{Text: text, Weight: 0.7, Touched: now, Status: lineLive}))
 }
 
 func updateMemory(r *Relationship, id, text string) error {
@@ -163,15 +173,20 @@ func updateMemory(r *Relationship, id, text string) error {
 	if !ok {
 		return ErrMemoryMissing
 	}
-	list := append([]string{}, memoryLines(r, kind)...)
-	if list[idx] == text {
+	list := copyLines(linesOf(r, kind))
+	if list[idx].Text == text {
 		return nil
 	}
-	if containsText(list, text) {
+	if lineContains(list, text) {
 		return ErrMemoryDuplicate
 	}
-	list[idx] = text
-	return setMemoryLines(r, kind, list)
+	list[idx].Text = text
+	list[idx].Touched = time.Now()
+	list[idx].Status = lineLive
+	if list[idx].Weight < 0.7 {
+		list[idx].Weight = 0.7
+	}
+	return setLines(r, kind, list)
 }
 
 func deleteMemory(r *Relationship, id string) error {
@@ -187,15 +202,15 @@ func deleteMemory(r *Relationship, id string) error {
 	if !ok {
 		return ErrMemoryMissing
 	}
-	list := append([]string{}, memoryLines(r, kind)...)
+	list := copyLines(linesOf(r, kind))
 	list = append(list[:idx], list[idx+1:]...)
-	return setMemoryLines(r, kind, list)
+	return setLines(r, kind, list)
 }
 
 func findMemory(r *Relationship, id string) (string, int, bool) {
 	for _, kind := range []string{KindOpenLoop, KindPromise, KindShared, KindJoke} {
-		for i, text := range memoryLines(r, kind) {
-			if memoryID(kind, text) == id {
+		for i, ln := range linesOf(r, kind) {
+			if memoryID(kind, ln.Text) == id {
 				return kind, i, true
 			}
 		}
@@ -203,7 +218,7 @@ func findMemory(r *Relationship, id string) (string, int, bool) {
 	return "", 0, false
 }
 
-func memoryLines(r *Relationship, kind string) []string {
+func linesOf(r *Relationship, kind string) Lines {
 	switch kind {
 	case KindOpenLoop:
 		return r.OpenLoops
@@ -218,7 +233,7 @@ func memoryLines(r *Relationship, kind string) []string {
 	}
 }
 
-func setMemoryLines(r *Relationship, kind string, list []string) error {
+func setLines(r *Relationship, kind string, list Lines) error {
 	switch kind {
 	case KindOpenLoop:
 		r.OpenLoops = list
@@ -275,9 +290,9 @@ func cleanMemoryText(s string) (string, error) {
 	return s, nil
 }
 
-func containsText(list []string, text string) bool {
+func lineContains(list Lines, text string) bool {
 	for _, item := range list {
-		if item == text {
+		if item.Text == text {
 			return true
 		}
 	}

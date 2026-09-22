@@ -54,6 +54,10 @@ var DefaultModeCriteria = map[string]string{
 // DefaultNeedLLM is the noul cutoff for launching the planner LLM.
 const DefaultNeedLLM = 0.55
 
+// DefaultKeep is the noul cutoff for spending a slow call to compress
+// this turn into durable memory. Below it, only the local gist seeds run.
+const DefaultKeep = 0.55
+
 // DefaultActConfidence is the choice confidence below which computer use
 // is refused. A missing confidence does not refuse; an explicit low one does.
 const DefaultActConfidence = 0.30
@@ -105,6 +109,7 @@ type Judgment struct {
 	SafetyP      float64               `json:"safety_p"`
 	PersonaFitP  float64               `json:"persona_fit_p,omitempty"`
 	NeedLLMP     float64               `json:"need_llm"`
+	KeepP        float64               `json:"keep,omitempty"`
 	Confidence   float64               `json:"confidence,omitempty"`
 	Attend       string                `json:"attend,omitempty"`
 	Act          string                `json:"act,omitempty"`
@@ -131,10 +136,11 @@ func (b Branch) Open() bool {
 // Observe is what she could look at this turn. Jev picks a channel;
 // it does not write the caption or the log.
 type Observe struct {
-	Camera string
-	Screen string
-	Log    []string
-	Window WindowView
+	Camera     string
+	Screen     string
+	Log        []string
+	Window     WindowView
+	Remembered []string
 }
 
 // WindowMod is one registered page module, as observation.
@@ -214,8 +220,8 @@ var ActLabels = map[string]string{
 	ActPlan:        "A slower written plan or decision is needed. Not a desktop action.",
 	ActReflect:     "They asked her to notice herself: who she is, whether she can feel her voice, face, or mood, or a fault in her own log. Not a request to edit code, use the computer, or look at a screenshot of her appearance. A later step on this branch may read one file or remember one line.",
 	ActLook:        "They asked how she is built, what her own code does, or to feel a specific file in her body. This branch keeps reading. If they then ask her to change herself, a later step may edit one allowlisted file. It does not reload the running process.",
-	ActCamera:      "They asked her to look through the camera now: at them, the room, or who is there. Not the computer screen, not a saved picture, and not a screenshot of her own face.",
-	ActScreen:      "They asked her to look at the computer screen now: which window or what is on the desktop. Computer-use window titles, not the camera, not a saved picture, and not a screenshot of her own face.",
+	ActCamera:      "They asked her to look through the camera now: at them, the room, or who is there. Not the computer screen, not a saved picture, and not a screenshot of her own face. A follow-up about that same view is not a new capability.",
+	ActScreen:      "They asked her to look at the computer screen now: which window or what is visible on the desktop. Not the room camera, not a saved picture, and not a screenshot of her own face. A follow-up about that same view is not a new capability.",
 	ActShot:        "They asked her to look at her own appearance now: what she looks like, her face, her clothes, her expression. One screenshot of herself on the stage. Not the room camera, not desktop window titles, not her source, and not a feeling-only check.",
 	ActCodex:       "They want her to change her own source. The runtime picks one allowlisted file, writes a strict intent, edits only that, then she feels the diff. Not a general desktop action, and not merely talking about code. The running process does not reload.",
 	ActComputerUse: "They want something done on this machine now that is not only editing her own repo: open an app, use a window, type, or act on the desktop. Not mere talk about computers.",
@@ -302,6 +308,16 @@ func questions(p *persona.Persona, withPersonaFit bool, planNote string, br Bran
 				"direction, or anything the live voice model cannot do well " +
 				"alone. No for greetings, backchannels (嗯/哦/好/喂), small " +
 				"talk, or a reply the voice model can continue immediately.",
+		},
+		"keep": {
+			Type: "noul",
+			Instructions: "Should this turn be written into durable memory? " +
+				"Yes if section latest reveals a fact or preference about the " +
+				"person, a promise, an unfinished task, a joke that might stick, " +
+				"or a shared moment that changes the relationship, or if it " +
+				"revises or finishes something in state.remembered. " +
+				"No for greetings, backchannels (嗯/哦/好/喂), and lines that " +
+				"only repeat what state.remembered already says.",
 		},
 		"attend": {
 			Type: "choice",
@@ -493,6 +509,9 @@ func Parse(userText string, ans map[string]jev.Answer) Judgment {
 	}
 	if a, ok := ans["need_llm"]; ok {
 		j.NeedLLMP = noulVal(a)
+	}
+	if a, ok := ans["keep"]; ok {
+		j.KeepP = noulVal(a)
 	}
 	if a, ok := ans["attend"]; ok && knownAttend[a.Choice] {
 		j.Attend = a.Choice
@@ -711,6 +730,17 @@ func (j *Judgment) WantLLM(thresh float64) bool {
 	return j.NeedLLMP >= thresh
 }
 
+// WantKeep reports whether this turn should spend a slow call to write memory.
+func (j *Judgment) WantKeep(thresh float64) bool {
+	if j == nil {
+		return false
+	}
+	if thresh <= 0 {
+		thresh = DefaultKeep
+	}
+	return j.KeepP >= thresh
+}
+
 // OffPersona reports whether the last assistant reply drifted off style.
 // Unasked persona_fit (no noul, zero value) does not count as a miss.
 func (j *Judgment) OffPersona(thresh float64) bool {
@@ -769,7 +799,11 @@ func JudgeTurn(ctx context.Context, client *jev.Client, p *persona.Persona,
 			"act is the only tool entry. " +
 			"If branch is present, stay on it until branch_done is yes. " +
 			"window is her own page module, not a desktop window. " +
-			"state.window.glance says what that page looks like; do not rewrite it.",
+			"state.window.glance says what that page looks like; do not rewrite it. " +
+			"remembered is what she already keeps; keep is yes only when this turn changes that.",
+	}
+	if len(obs.Remembered) > 0 {
+		state["remembered"] = obs.Remembered
 	}
 	if obs.Window.Live() {
 		state["window"] = windowState(obs.Window)

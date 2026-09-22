@@ -1,7 +1,9 @@
 // Package eye is her outer sight. Camera, her own face, and the desktop
 // are separate looks. Camera frames and one screenshot of herself go
-// through a VLM. The screen is not a screenshot: it is computer-use
-// observation (window titles classified by Jev).
+// through a VLM. The screen starts as computer-use window titles. When
+// the question is about what is visible, one desktop picture is captioned
+// for that question only. A later question looks again; it does not reuse
+// the first caption.
 package eye
 
 import (
@@ -67,6 +69,7 @@ type Options struct {
 	Grab     func(ctx context.Context) bool                // ask the viewer for one camera JPEG; false means do not wait
 	GrabShot func(ctx context.Context) bool                // ask the viewer for one screenshot of her own face
 	Observe  func(ctx context.Context) (ScreenView, error) // computer-use glance; tests inject
+	Capture  func(ctx context.Context) ([]byte, error)     // one desktop JPEG when the question needs pixels
 	Jev      Evaluator
 	LLM      Visioner
 	LogFn    func(string)

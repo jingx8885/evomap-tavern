@@ -151,11 +151,11 @@ func feltSee(live Live, attend string) string {
 	}
 	switch {
 	case seeCamera(attend) && seeScreen(attend):
-		s.WriteString("Camera and screen are separate. Camera is pixels. The screen is computer-use window titles, not a screenshot. Speak only from the notes below, short. ")
+		s.WriteString("Camera and screen are separate. Camera is the room. The screen note lists windows, and may include a short picture answer when they asked what is visible. Speak only from the notes below. ")
 	case seeCamera(attend):
-		s.WriteString("You are looking through the camera. This is the room, not the computer screen. Speak from the camera note only, short. ")
+		s.WriteString("You are looking through the camera. This is the room, not the computer screen. Speak from the camera note only. Answer their latest question about this view. ")
 	case seeScreen(attend):
-		s.WriteString("You are looking at the screen. This is computer-use window titles, not the camera and not a screenshot. Speak from the screen note only, short. ")
+		s.WriteString("You are looking at the screen. The note lists windows, and a picture answer if they asked what is visible. That is not the camera. Speak from the screen note only. Answer their latest question. ")
 	}
 	if seeCamera(attend) {
 		if live.Camera != "" {
@@ -174,7 +174,7 @@ func feltSee(live Live, attend string) string {
 	if !seeCamera(attend) && !seeScreen(attend) {
 		s.WriteString("No visual channel was selected. ")
 	}
-	s.WriteString("Do not dump OCR or invent details that are not in those notes. Their language. Voice-length.")
+	s.WriteString("Answer their latest question from these notes. Do not recite an earlier description that does not answer it. Do not invent details that are not written here. Their language. Voice-length.")
 	return s.String()
 }
 
@@ -251,7 +251,7 @@ func LogicCue() string {
 		"reflect notices your own state. look reads your source. " +
 		"A self loop can read again, remember one line, or change one allowlisted file, then feel what changed. " +
 		"The running process stays the previous build until a separate restart. " +
-		"camera looks through the lens. shot is one screenshot of your own face. screen reads computer-use window titles, not a screenshot. They are separate. " +
+		"camera looks through the lens and looks again when they ask something new about that view. shot is one screenshot of your own face. screen reads window titles, and can answer one picture question about what is visible. They are separate. " +
 		"computer_use is the desk loop that can touch windows. " +
 		"divine casts six lines when they ask for a fortune; you feel the plate, you do not invent the coins. " +
 		"The stage window is a page module: pictures, clips, and notes land there, and you can feel what that page looks like. " +

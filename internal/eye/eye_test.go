@@ -211,6 +211,90 @@ func TestGlanceIsOneSource(t *testing.T) {
 	}
 }
 
+func TestAsksScene(t *testing.T) {
+	if !AsksScene("有几个人") || !AsksScene("摄像头里现在呢") {
+		t.Fatal("a question about the view should look again")
+	}
+	if AsksScene("哈哈你好搞笑") || AsksScene("看看屏幕") || AsksScene("看看摄像头") || AsksScene("") {
+		t.Fatal("chat and a plain look are not a picture question")
+	}
+}
+
+func TestCameraFollowUpReplacesCaption(t *testing.T) {
+	var prompts []string
+	e := New(Options{
+		LLM: fakeVision{fn: func(_ context.Context, _, user string, _ []byte) (string, error) {
+			prompts = append(prompts, user)
+			if strings.Contains(user, "有几个人") {
+				return "两个人。", nil
+			}
+			return "屋里亮着灯。", nil
+		}},
+	})
+	if err := e.pushJPEG(SourceCamera, SolidJPEG(16, 16, color.Gray{Y: 30})); err != nil {
+		t.Fatal(err)
+	}
+	first := e.GlanceAsk(context.Background(), SourceCamera, "看看摄像头")
+	if !strings.Contains(first.Caption, "屋里亮着灯") {
+		t.Fatalf("first %q", first.Caption)
+	}
+	second := e.GlanceAsk(context.Background(), SourceCamera, "有几个人")
+	if !strings.Contains(second.Caption, "两个人") || strings.Contains(second.Caption, "屋里亮着灯") {
+		t.Fatalf("follow-up kept the first caption: %q", second.Caption)
+	}
+	if len(prompts) != 2 || !strings.Contains(prompts[1], "有几个人") {
+		t.Fatalf("prompts %q", prompts)
+	}
+}
+
+func TestScreenQuestionUsesPicture(t *testing.T) {
+	var caps atomic.Int32
+	e := New(Options{
+		Observe: func(context.Context) (ScreenView, error) {
+			return ScreenView{Caption: "前台 Chrome", Signature: "ch"}, nil
+		},
+		Capture: func(context.Context) ([]byte, error) {
+			caps.Add(1)
+			return SolidJPEG(32, 24, color.RGBA{R: 20, G: 40, B: 80, A: 255}), nil
+		},
+		LLM: fakeVision{fn: func(_ context.Context, system, user string, jpeg []byte) (string, error) {
+			if len(jpeg) == 0 || !strings.Contains(system, "screenshot") || !strings.Contains(user, "有几个人") {
+				t.Fatalf("picture prompt sys=%q user=%q bytes=%d", system, user, len(jpeg))
+			}
+			return "画面里有两个人。", nil
+		}},
+	})
+	plain := e.Glance(context.Background(), SourceScreen)
+	if caps.Load() != 0 || !strings.Contains(plain.Caption, "Chrome") || strings.Contains(plain.Caption, "两个人") {
+		t.Fatalf("plain look should stay titles: %q caps=%d", plain.Caption, caps.Load())
+	}
+	asked := e.GlanceAsk(context.Background(), SourceScreen, "有几个人")
+	if caps.Load() != 1 || !strings.Contains(asked.Caption, "Chrome") || !strings.Contains(asked.Caption, "两个人") {
+		t.Fatalf("question look %q caps=%d", asked.Caption, caps.Load())
+	}
+}
+
+func TestScreenPrivateSkipsPicture(t *testing.T) {
+	var caps atomic.Int32
+	e := New(Options{
+		Observe: func(context.Context) (ScreenView, error) {
+			return ScreenView{Caption: "看起来是私人窗口，不细看。", Private: true}, nil
+		},
+		Capture: func(context.Context) ([]byte, error) {
+			caps.Add(1)
+			return SolidJPEG(8, 8, color.White), nil
+		},
+		LLM: fakeVision{fn: func(context.Context, string, string, []byte) (string, error) {
+			t.Fatal("private screen must not call the vision model")
+			return "", nil
+		}},
+	})
+	g := e.GlanceAsk(context.Background(), SourceScreen, "有几个人")
+	if caps.Load() != 0 || !strings.Contains(g.Caption, "私人") || strings.Contains(g.Caption, "画面") {
+		t.Fatalf("caption %q caps=%d", g.Caption, caps.Load())
+	}
+}
+
 func TestEncodeRoundTrip(t *testing.T) {
 	raw := SolidJPEG(64, 48, color.RGBA{R: 10, G: 200, B: 30, A: 255})
 	img, err := jpeg.Decode(bytes.NewReader(raw))

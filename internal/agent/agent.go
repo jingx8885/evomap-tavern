@@ -171,7 +171,8 @@ func Run(ctx context.Context, opt Options) error {
 				}
 				return eye.ScreenView{Caption: g.Caption, Signature: g.Signature, Private: g.Private}, nil
 			},
-			LogFn: func(s string) { opt.log("[eye] %s", s) },
+			Capture: eye.CaptureDesktop,
+			LogFn:   func(s string) { opt.log("[eye] %s", s) },
 			OnSight: func(s eye.Sight) {
 				if opt.sense == nil {
 					return
@@ -856,6 +857,9 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 		if opt.deskWin != nil {
 			obs.Window = windowView(opt.deskWin.Spec())
 		}
+		if opt.rel != nil {
+			obs.Remembered = opt.rel.ForJudge()
+		}
 		jd, err := judge.JudgeTurn(ctx, jc, p, mem, userText, pl.Current(), obs, slot.snapshot())
 		if err != nil {
 			gate.finish(userText, false)
@@ -875,16 +879,18 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 			if !final {
 				tag = " early"
 			}
-			opt.log("[judge]%s emotion=%s intent=%s self=%s jev_mode=%s attend=%s act=%s window=%s op=%s valence=%.2f arousal=%.2f engage=%.2f safety=%.2f fit=%.2f need_llm=%.2f conf=%.2f",
+			opt.log("[judge]%s emotion=%s intent=%s self=%s jev_mode=%s attend=%s act=%s window=%s op=%s valence=%.2f arousal=%.2f engage=%.2f safety=%.2f fit=%.2f need_llm=%.2f keep=%.2f conf=%.2f",
 				tag, jd.Emotion, orDash(jd.Intent), orDash(jd.SelfEmotion), orDash(jd.Mode), orDash(jd.Attend), orDash(jd.Act),
 				orDash(jd.Window), orDash(jd.WinOp),
-				jd.Valence, jd.Arousal, jd.Engagement, jd.SafetyP, jd.PersonaFitP, jd.NeedLLMP, jd.Confidence)
+				jd.Valence, jd.Arousal, jd.Engagement, jd.SafetyP, jd.PersonaFitP, jd.NeedLLMP, jd.KeepP, jd.Confidence)
 
 			mode := judge.DecideMode(jd, affect, p.Judge.SafetyThresh, pl.Current())
 			if final && opt.rel != nil {
 				if _, err := opt.rel.ObserveTurn(p.Name, userText, mem.LatestAssistantText(), jd.Emotion, jd.SelfEmotion, mode,
 					jd.Valence, jd.Arousal, jd.Engagement, jd.PersonaFitP); err != nil {
 					opt.log("[relationship] save failed: %v", err)
+				} else if mode != "safety" && jd.WantKeep(judge.DefaultKeep) {
+					foldMemory(opt, lc, userText, mem.LatestAssistantText(), mode)
 				}
 			}
 			if opt.avatarHub != nil {
@@ -911,7 +917,7 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 					"engage": jd.Engagement, "early": !final,
 				},
 			})
-			note := steering.BuildWithScene(p, mode, jd, affect, pl.Current(), sceneCue(opt.rel))
+			note := steering.BuildWithScene(p, mode, jd, affect, pl.Current(), sceneCue(opt.rel, userText))
 			ask := sense.ParseAsk(userText)
 			if ask.Kind != "" {
 				opt.sense.Set(func(l *sense.Live) { l.LastAsk = ask.Kind })
@@ -1129,11 +1135,11 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 	case judge.ActReflect, judge.ActLook, judge.ActCodex:
 		ensureSelf(ctx, opt, p, jc, lc, sess, slot, jd, act, mode)
 	case judge.ActCamera:
-		startSight(ctx, opt, p, sess, eye.SourceCamera, continuing)
+		startSight(ctx, opt, p, sess, eye.SourceCamera, continuing, userText)
 	case judge.ActScreen:
-		startSight(ctx, opt, p, sess, eye.SourceScreen, continuing)
+		startSight(ctx, opt, p, sess, eye.SourceScreen, continuing, userText)
 	case judge.ActShot:
-		startSight(ctx, opt, p, sess, eye.SourceShot, continuing)
+		startSight(ctx, opt, p, sess, eye.SourceShot, continuing, userText)
 	case judge.ActDivine:
 		ensureDivine(ctx, opt, p, lc, sess, slot, userText, continuing)
 	case judge.ActPlan:
@@ -1433,14 +1439,23 @@ func runPercept(ctx context.Context, opt Options, lc *llm.Client, sess *livevoic
 	slot.close()
 }
 
-func startSight(ctx context.Context, opt Options, p *persona.Persona, sess *livevoice.Session, source string, again bool) {
+func startSight(ctx context.Context, opt Options, p *persona.Persona, sess *livevoice.Session, source string, again bool, question string) {
+	if again && !eye.AsksScene(question) {
+		return
+	}
 	if opt.eyes == nil {
 		opt.log("[act] %s unavailable", source)
 		voiceNudge(opt, sess, sightMiss(source))
 		return
 	}
+	if again {
+		voiceSteer(opt, sess, "They asked something new about this look. A fresh note is coming. Do not answer from the previous description.")
+	}
 	go func() {
-		g := opt.eyes.Glance(ctx, source)
+		g := opt.eyes.GlanceAsk(ctx, source, question)
+		if ctx.Err() != nil {
+			return
+		}
 		opt.log("[act] %s %s", source, clip(g.Caption, 80))
 		if opt.sense != nil {
 			if felt := opt.sense.Felt(p, sense.Ask{Kind: sightAsk(source)}, source); felt != "" {
@@ -1451,10 +1466,7 @@ func startSight(ctx context.Context, opt Options, p *persona.Persona, sess *live
 				}
 			}
 		}
-		if again {
-			return
-		}
-		voiceNudge(opt, sess, sightSpoke(source, g.Ready && strings.TrimSpace(g.Caption) != ""))
+		voiceNudge(opt, sess, sightSpoke(source, g.Ready && strings.TrimSpace(g.Caption) != "", again, question))
 	}()
 }
 
@@ -1480,14 +1492,23 @@ func sightMiss(source string) string {
 	}
 }
 
-func sightSpoke(source string, ready bool) string {
+func sightSpoke(source string, ready, again bool, question string) string {
+	if source == eye.SourceShot && !ready {
+		return "The screenshot of yourself did not arrive. Say so in one short in-character line. Do not invent how you look. Do not describe the camera or the desktop."
+	}
+	q := strings.TrimSpace(question)
+	if eye.AsksScene(q) {
+		lead := "You just looked. "
+		if again {
+			lead = "This is a new look for their follow-up. "
+		}
+		return lead + "Answer only this question, in one or two in-character sentences, from the latest note: " +
+			clip(q, 80) + ". Do not repeat an earlier description that does not answer it. Do not invent."
+	}
 	switch source {
 	case eye.SourceScreen:
-		return "You just looked at the screen. Say what is there in one or two in-character sentences, only from the screen note. It is window titles, not a screenshot. Do not describe the camera. Do not invent."
+		return "You just looked at the screen. Say what is there in one or two in-character sentences, only from the screen note. Window titles say which app is open. A picture answer, if the note has one, is what is visible. Do not describe the camera. Do not invent."
 	case eye.SourceShot:
-		if !ready {
-			return "The screenshot of yourself did not arrive. Say so in one short in-character line. Do not invent how you look. Do not describe the camera or the desktop."
-		}
 		return "You just looked at a screenshot of yourself. Say what you look like in one or two in-character sentences, only from the screenshot note. Do not describe the camera or the desktop. Do not invent."
 	default:
 		return "You just looked through the camera. Say what you see in one or two in-character sentences, only from the camera note. Do not describe the screen. Do not invent."
@@ -1846,17 +1867,40 @@ func relCue(store *memory.RelationshipStore) memory.RelationshipCue {
 	return store.Cue()
 }
 
-func sceneCue(store *memory.RelationshipStore) steering.SceneCue {
+func sceneCue(store *memory.RelationshipStore, userText string) steering.SceneCue {
 	if store == nil {
 		return steering.SceneCue{}
 	}
-	c := store.Cue()
+	c := store.Recall(userText)
 	return steering.SceneCue{
 		Stage:        c.Stage,
 		Summary:      c.Summary,
 		OpenLoops:    append([]string(nil), c.OpenLoops...),
 		SharedEvents: append([]string(nil), c.SharedEvents...),
 	}
+}
+
+func foldMemory(opt Options, lc *llm.Client, userText, assistantText, mode string) {
+	if opt.rel == nil || lc == nil || !opt.rel.BeginFold() {
+		return
+	}
+	go func() {
+		defer opt.rel.EndFold()
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		notes, err := opt.rel.Fold(ctx, lc, memory.FoldIn{
+			User:      userText,
+			Assistant: assistantText,
+			Mode:      mode,
+		})
+		if err != nil {
+			opt.log("[memory] fold skipped: %v", err)
+			return
+		}
+		if len(notes) > 0 {
+			opt.log("[memory] %s", strings.Join(notes, " | "))
+		}
+	}()
 }
 
 func slugify(s string) string {

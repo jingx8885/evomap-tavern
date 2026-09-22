@@ -577,7 +577,7 @@
       summary: (view && view.summary) || "",
       editing: memoryEditing,
       items: items.map(function (item) {
-        return (item.id || "") + "\n" + (item.kind || "") + "\n" + (item.text || "");
+        return (item.id || "") + "\n" + (item.kind || "") + "\n" + (item.text || "") + "\n" + (item.weight || 0) + "\n" + (item.status || "");
       }),
     });
   }
@@ -617,7 +617,9 @@
       const li = document.createElement("li");
       const kind = document.createElement("span");
       kind.className = "mem-kind";
+      if (item.status === "fading") kind.classList.add("fading");
       kind.textContent = MEMORY_LABEL[item.kind] || item.kind;
+      kind.title = item.status === "fading" ? "在淡" : "";
       const text = document.createElement("div");
       text.className = "mem-text";
       const actions = document.createElement("div");
@@ -646,7 +648,17 @@
         input.focus();
         return;
       }
-      text.textContent = item.text || "";
+      text.textContent = "";
+      const label = document.createElement("span");
+      label.textContent = item.text || "";
+      text.appendChild(label);
+      if (typeof item.weight === "number" && item.weight > 0) {
+        const bar = document.createElement("i");
+        bar.className = "mem-weight";
+        if (item.status === "fading") bar.classList.add("fading");
+        bar.style.width = Math.max(8, Math.round(item.weight * 100)) + "%";
+        text.appendChild(bar);
+      }
       const edit = document.createElement("button");
       edit.type = "button";
       edit.textContent = "改";

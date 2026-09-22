@@ -5,7 +5,20 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jingx8885/lov-evo/internal/eye"
 )
+
+func TestSightFollowUpNamesTheQuestion(t *testing.T) {
+	msg := sightSpoke(eye.SourceCamera, true, true, "有几个人")
+	if !strings.Contains(msg, "有几个人") || !strings.Contains(msg, "follow-up") {
+		t.Fatalf("follow-up %q", msg)
+	}
+	plain := sightSpoke(eye.SourceCamera, true, false, "你好")
+	if strings.Contains(plain, "follow-up") || strings.Contains(plain, "你好") {
+		t.Fatalf("plain look %q", plain)
+	}
+}
 
 func TestJudgeWorthSkipsNoiseAndFragments(t *testing.T) {
 	if judgeWorth("先加") || judgeWorth("就是") || judgeWorth("[mouth noise") || judgeWorth("[tongue click]") {

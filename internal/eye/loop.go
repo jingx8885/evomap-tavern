@@ -80,23 +80,30 @@ func (e *Eyes) Snapshot() Sight {
 // Camera captions one room JPEG. Shot captions one screenshot of her face.
 // Screen takes one computer-use window snapshot.
 func (e *Eyes) Glance(ctx context.Context, source string) Glimpse {
+	return e.GlanceAsk(ctx, source, "")
+}
+
+// GlanceAsk looks again for this question. An empty question is the
+// generic caption. A scene question is answered from a fresh frame,
+// not from the previous caption.
+func (e *Eyes) GlanceAsk(ctx context.Context, source, question string) Glimpse {
 	if e == nil {
 		return Glimpse{}
 	}
 	switch source {
 	case SourceCamera:
-		return e.glanceCamera(ctx)
+		return e.glanceCamera(ctx, question)
 	case SourceShot:
-		return e.glanceShot(ctx)
+		return e.glanceShot(ctx, question)
 	case SourceScreen:
-		e.refreshScreen(ctx)
+		e.refreshScreen(ctx, question)
 		return e.Snapshot().Screen
 	default:
 		return Glimpse{}
 	}
 }
 
-func (e *Eyes) glanceCamera(ctx context.Context) Glimpse {
+func (e *Eyes) glanceCamera(ctx context.Context, question string) Glimpse {
 	if e.opt.Grab != nil {
 		mark := time.Now()
 		if e.opt.Grab(ctx) {
@@ -127,12 +134,12 @@ func (e *Eyes) glanceCamera(ctx context.Context) Glimpse {
 		e.emit(e.Snapshot())
 		return e.Snapshot().Camera
 	}
-	e.describe(ctx, cam, true)
+	e.describe(ctx, cam, true, question)
 	e.emit(e.Snapshot())
 	return e.Snapshot().Camera
 }
 
-func (e *Eyes) glanceShot(ctx context.Context) Glimpse {
+func (e *Eyes) glanceShot(ctx context.Context, question string) Glimpse {
 	if e.opt.GrabShot != nil {
 		mark := time.Now()
 		if e.opt.GrabShot(ctx) {
@@ -146,7 +153,7 @@ func (e *Eyes) glanceShot(ctx context.Context) Glimpse {
 		e.log("shot: no frame")
 		return Glimpse{Source: SourceShot}
 	}
-	e.describe(ctx, frame, true)
+	e.describe(ctx, frame, true, question)
 	e.emit(e.Snapshot())
 	return e.Snapshot().Shot
 }
@@ -173,7 +180,7 @@ func (e *Eyes) waitFrame(ctx context.Context, source string, after time.Time, d 
 	}
 }
 
-func (e *Eyes) refreshScreen(ctx context.Context) {
+func (e *Eyes) refreshScreen(ctx context.Context, question string) {
 	view, err := e.observe(ctx)
 	if err != nil {
 		e.log("screen: %v", err)
@@ -189,11 +196,46 @@ func (e *Eyes) refreshScreen(ctx context.Context) {
 	if g.Caption == "" {
 		g.Caption = "桌面窗口快照还是空的"
 	}
+	if !view.Private && AsksScene(question) {
+		pic, picErr := e.picture(ctx, question)
+		switch {
+		case picErr != nil || pic == "":
+			g.Caption += "。这一眼没有拿到画面，回答不了画面里的问题。"
+			e.log("screen picture: %v", picErr)
+		default:
+			g.Caption += "。画面：" + pic
+			g.Noted = true
+		}
+	}
 	e.mu.Lock()
 	e.seen[SourceScreen] = g
 	e.mu.Unlock()
 	e.log("screen: %s", g.Caption)
 	e.emit(e.Snapshot())
+}
+
+func (e *Eyes) picture(ctx context.Context, question string) (string, error) {
+	if e.opt.Capture == nil || e.opt.LLM == nil {
+		return "", fmt.Errorf("no screen picture")
+	}
+	raw, err := e.opt.Capture(ctx)
+	if err != nil {
+		return "", err
+	}
+	frame, err := NormalizeFrame(SourceScreen, raw, maxScreenEdge)
+	if err != nil {
+		return "", err
+	}
+	sys, user := picturePrompt(question)
+	text, err := e.opt.LLM.ChatVision(ctx, sys, user, frame.JPEG)
+	if err != nil {
+		return "", err
+	}
+	text = clipCaption(text, 180)
+	if text == "" {
+		return "", fmt.Errorf("empty picture answer")
+	}
+	return text, nil
 }
 
 func (e *Eyes) observe(ctx context.Context) (ScreenView, error) {
@@ -203,11 +245,11 @@ func (e *Eyes) observe(ctx context.Context) (ScreenView, error) {
 	return ScreenView{}, fmt.Errorf("no computer-use observer")
 }
 
-func (e *Eyes) describe(ctx context.Context, f Frame, mention bool) {
+func (e *Eyes) describe(ctx context.Context, f Frame, mention bool, question string) {
 	if e.opt.LLM == nil || len(f.JPEG) == 0 {
 		return
 	}
-	sys, user := describePrompt(f.Source)
+	sys, user := describePrompt(f.Source, question)
 	text, err := e.opt.LLM.ChatVision(ctx, sys, user, f.JPEG)
 	if err != nil {
 		e.log("%s vlm: %v", f.Source, err)
