@@ -77,6 +77,30 @@ func TestApplyTranscriptAddedDeltaPairs(t *testing.T) {
 	}
 }
 
+func TestRepeatTranscriptEmitsOnce(t *testing.T) {
+	s := &Session{events: make(chan Event, 8)}
+	raw := []byte(`{"type":"session.input_transcript.delta","delta":"邮件你好我刚找了很久"}`)
+	s.handleEvent(raw)
+	s.handleEvent(raw)
+	s.handleEvent(raw)
+	if n := len(s.events); n != 1 {
+		t.Fatalf("repeated snapshot emitted %d events", n)
+	}
+	ev := <-s.events
+	if ev.Kind != EventTranscript || ev.Speaker != "user" || ev.Text != "邮件你好我刚找了很久" {
+		t.Fatalf("event %+v", ev)
+	}
+}
+
+func TestGrowingTranscriptStillEmits(t *testing.T) {
+	s := &Session{events: make(chan Event, 8)}
+	s.handleEvent([]byte(`{"type":"session.input_transcript.delta","delta":"你"}`))
+	s.handleEvent([]byte(`{"type":"session.input_transcript.delta","delta":"好"}`))
+	if n := len(s.events); n != 2 {
+		t.Fatalf("deltas emitted %d events", n)
+	}
+}
+
 func TestApplyTranscriptIgnoresShorterSnapshot(t *testing.T) {
 	var b strings.Builder
 	applyTranscript(&b, "你好呀?")

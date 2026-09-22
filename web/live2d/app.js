@@ -270,22 +270,25 @@
     }
   }
 
+  let pendingDrive = null;
+
+  function paintStatus(frame) {
+    setStatus(`${frame.relationship_stage || "现在"} · ${frame.self_emotion || frame.emotion || "听着"}`);
+  }
+
   async function applyDrive(frame) {
-    if (!frame || !model) return;
+    if (!frame || frame.type === "lipsync" || frame.type === "log" || frame.type === "capture" || frame.type === "shot") {
+      return;
+    }
+    // The socket often delivers the startup face before Cubism finishes
+    // loading. Keep it and paint once the model exists.
+    pendingDrive = frame;
+    if (!model) return;
     lastDrive = frame;
     renderHud(frame);
-    await applyExpression(frame.expression);
-    const group = frame.motion_group || "Idle";
-    const index = Number.isFinite(frame.motion_index) ? frame.motion_index : 0;
-    const motionKey = group + ":" + index;
-    if (motionKey !== lastMotion) {
-      try {
-        await model.motion(group, index);
-        lastMotion = motionKey;
-      } catch (err) {
-        console.warn("motion", group, index, err);
-      }
-    }
+    // Haru's idle motions loop forever. Waiting for model.motion() to
+    // settle meant this line stayed on "waiting for Jev" after every turn.
+    paintStatus(frame);
     lastMode = frame.mode;
     const look = Number.isFinite(frame.look_at) ? frame.look_at : 0.6;
     const w = app.renderer.width;
@@ -293,7 +296,21 @@
     const x = w * (0.5 + (look - 0.5) * 0.35);
     const y = h * (0.28 + (1 - look) * 0.12);
     model.focus(x, y);
-    setStatus(`${frame.relationship_stage || "现在"} · ${frame.self_emotion || frame.emotion || "听着"}`);
+    void applyExpression(frame.expression);
+    const group = frame.motion_group || "Idle";
+    const index = Number.isFinite(frame.motion_index) ? frame.motion_index : 0;
+    const motionKey = group + ":" + index;
+    if (motionKey !== lastMotion) {
+      lastMotion = motionKey;
+      try {
+        const started = model.motion(group, index);
+        if (started && typeof started.catch === "function") {
+          started.catch((err) => console.warn("motion", group, index, err));
+        }
+      } catch (err) {
+        console.warn("motion", group, index, err);
+      }
+    }
   }
 
   function layoutModel() {
@@ -1008,6 +1025,20 @@
     pollSense();
     setInterval(pollSense, 2000);
     if (unmuteBtn) unmuteBtn.classList.add("hidden");
+    if (pendingDrive) {
+      await applyDrive(pendingDrive);
+    }
+    if (!lastDrive.mode) {
+      try {
+        const last = await fetch("/api/last");
+        if (last.ok) {
+          const frame = await last.json();
+          if (frame && frame.mode) await applyDrive(frame);
+        }
+      } catch (err) {
+        console.warn("last drive", err);
+      }
+    }
     window.__avatar = {
       get mouth() { return mouth; },
       get target() { return mouthTarget; },
@@ -1020,7 +1051,7 @@
       get lipSyncIds() { return mouthIds(); },
       setMouth(v) { applyLipsync(v); },
     };
-    setStatus("waiting for Jev…");
+    if (!lastDrive.mode) setStatus("听着");
   }
 
   main().catch((err) => {

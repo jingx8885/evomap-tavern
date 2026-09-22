@@ -135,9 +135,27 @@ func openWinmmPlayer() *Player {
 		}
 		cp := make([]byte, len(pcm))
 		copy(cp, pcm)
+		// Never block the websocket reader. A full queue means playback
+		// is already behind; waiting here held the reply open until
+		// the speaker drained it, so the turn never reached Jev.
 		select {
 		case <-stopCh:
+			return
+		default:
+		}
+		select {
 		case in <- cp:
+			return
+		default:
+		}
+		select {
+		case <-in:
+		default:
+		}
+		select {
+		case in <- cp:
+		case <-stopCh:
+		default:
 		}
 	}
 	var once atomic.Bool

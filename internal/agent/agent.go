@@ -374,8 +374,17 @@ func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
 	sess.SetNote(func(m string) { opt.log("%s", m) })
 	var lastTurnKey string
 	var lastTurnAt time.Time
+	var lastPartial string
 	gate := newJevGate()
 	slot := &capabilitySlot{}
+	armJudge := func(text string) {
+		if !judgeWorth(text) {
+			return
+		}
+		gate.schedule(judgeQuiet, text, func() {
+			processTurn(ctx, opt, p, jevClient, llmClient, mem, pl, sess, gate, slot, text, true)
+		})
+	}
 	if opt.power != nil {
 		opt.power.SetStop(slot.close)
 	}
@@ -389,6 +398,7 @@ func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
 			}
 			switch ev.Kind {
 			case livevoice.EventTurnDone:
+				lastPartial = ""
 				assistant, _ := ev.Usage["assistant"].(string)
 				key := ev.Text + "\x00" + assistant
 				if key == lastTurnKey && time.Since(lastTurnAt) < time.Second {
@@ -414,11 +424,18 @@ func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
 						l.LastUser = clip(ev.Text, 160)
 					}
 				})
-				gate.closeUtterance()
-				go processTurn(ctx, opt, p, jevClient, llmClient, mem, pl, sess, gate, slot, ev.Text, true)
+				armJudge(ev.Text)
 			case livevoice.EventTranscript:
 				if ev.Speaker == "user" {
-					opt.log("[user~] %s", clip(ev.Text, 120))
+					shown := clip(ev.Text, 120)
+					// Once the visible prefix stops changing, further
+					// deltas are the same line. Logging each one stalled
+					// the turn loop and the Live2D trace.
+					if shown != lastPartial {
+						lastPartial = shown
+						opt.log("[user~] %s", shown)
+					}
+					armJudge(ev.Text)
 				}
 			case livevoice.EventWarning:
 				opt.log("[voice warning] %v", ev.Err)
@@ -443,8 +460,26 @@ func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
 // of those turns is what made Jev fire continuously.
 const jevMinInterval = 10 * time.Second
 
+// judgeQuiet waits out a VAD burst. A pause shorter than this is still
+// the same utterance, so it must not spend another System One call.
+const judgeQuiet = 1200 * time.Millisecond
+
 // earlyMinRunes keeps a one-character ASR fragment from spending a Jev call.
 const earlyMinRunes = 8
+
+// judgeWorth reports whether this text may spend a System One call.
+// Mouth noise and short backchannels are not turns.
+func judgeWorth(text string) bool {
+	n := strings.Join(strings.Fields(text), " ")
+	if n == "" || len([]rune(n)) < earlyMinRunes {
+		return false
+	}
+	lower := strings.ToLower(n)
+	if strings.Contains(lower, "[mouth") || strings.Contains(lower, "[tongue") || strings.Contains(lower, "[click") || strings.Contains(lower, "noise]") {
+		return false
+	}
+	return true
+}
 
 // jevGate dedupes turn judgments. Partial transcripts do not call Jev;
 // turn.done does, and not again until jevMinInterval has passed.
@@ -827,7 +862,10 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 			opt.log("[judge] skipped: %v", err)
 		} else {
 			gate.finish(userText, true)
-			if !gate.current(epoch) {
+			// A later VAD slice used to bump the epoch and throw this
+			// result away, then the next slice paid for another call.
+			// Speculative results still have to lose to turn.done.
+			if !final && !gate.current(epoch) {
 				return
 			}
 			safety := jd.SafetyP >= p.Judge.SafetyThresh
@@ -921,7 +959,6 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 			judged = true
 		}
 	} else if final && gate.cooling() {
-		opt.log("[judge] skip (within %s)", gate.minInterval)
 		// A log question still has to land. Cooling must not drop the
 		// journal, or she answers as if she cannot see her own log.
 		if ask := sense.ParseAsk(userText); opt.sense != nil && (ask.Kind == sense.AskLog || ask.Kind == sense.AskCamera || ask.Kind == sense.AskScreen || ask.Kind == sense.AskShot || ask.Kind == sense.AskWindow) {
@@ -1880,10 +1917,11 @@ func viewerLog(line string) bool {
 
 func clip(s string, n int) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > n {
-		return s[:n] + "..."
+	r := []rune(s)
+	if len(r) <= n {
+		return s
 	}
-	return s
+	return string(r[:n]) + "..."
 }
 
 func orDash(s string) string {

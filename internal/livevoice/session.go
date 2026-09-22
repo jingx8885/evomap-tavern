@@ -591,9 +591,17 @@ func (s *Session) handleEvent(data []byte) {
 		if speaker == "user" {
 			dst = &s.turnUser
 		}
-		applyTranscript(dst, text)
+		changed := applyTranscript(dst, text)
+		if speaker != "user" && applyTranscript(&s.interim, text) {
+			changed = true
+		}
+		// The gateway resends the same cumulative transcript on a timer.
+		// Emitting each copy flooded the agent loop, so turn.done was
+		// dropped and the voice model stayed in a reply.
+		if !changed {
+			return
+		}
 		if speaker != "user" {
-			applyTranscript(&s.interim, text)
 			s.duckMic()
 			s.markSpeaking()
 		}
@@ -676,23 +684,31 @@ func eventRole(ev map[string]any) string {
 // applyTranscript merges one gateway transcript event into the turn buffer.
 // Events are sometimes single-character deltas and sometimes growing
 // snapshots; replacing on every event kept only the last character ("?").
-func applyTranscript(dst *strings.Builder, text string) {
+// It reports whether the buffer changed. A repeated snapshot must not
+// look like a new utterance.
+func applyTranscript(dst *strings.Builder, text string) bool {
 	if text == "" {
-		return
+		return false
 	}
 	cur := dst.String()
 	switch {
 	case cur == "":
 		dst.WriteString(text)
+		return true
 	case text == cur:
+		return false
 	case strings.HasSuffix(cur, text):
 		// added + delta often carry the same chunk
+		return false
 	case strings.HasPrefix(text, cur):
 		dst.Reset()
 		dst.WriteString(text)
+		return true
 	case strings.HasPrefix(cur, text):
+		return false
 	default:
 		dst.WriteString(text)
+		return true
 	}
 }
 
@@ -1050,7 +1066,10 @@ func (s *Session) emit(ev Event) {
 		return
 	}
 	// Closed/error must not be dropped: the agent reconnects on them.
-	if ev.Kind == EventClosed || ev.Kind == EventError {
+	// turn.done must not be dropped either. A burst of partial
+	// transcripts used to fill this channel and the turn never reached
+	// Jev, so the voice model stayed in a reply.
+	if ev.Kind == EventClosed || ev.Kind == EventError || ev.Kind == EventTurnDone {
 		select {
 		case s.events <- ev:
 		case <-time.After(time.Second):

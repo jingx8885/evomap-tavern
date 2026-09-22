@@ -1,10 +1,31 @@
 package agent
 
 import (
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestJudgeWorthSkipsNoiseAndFragments(t *testing.T) {
+	if judgeWorth("先加") || judgeWorth("就是") || judgeWorth("[mouth noise") || judgeWorth("[tongue click]") {
+		t.Fatal("noise and short fragments must not spend a Jev call")
+	}
+	if !judgeWorth("就是这个 prompt 我们要配到那个代码上") {
+		t.Fatal("a real utterance should be judged")
+	}
+}
+
+func TestClipCountsRunes(t *testing.T) {
+	s := strings.Repeat("邮", 40)
+	got := clip(s, 8)
+	if got != "邮邮邮邮邮邮邮邮..." {
+		t.Fatalf("got %q", got)
+	}
+	if clip("你好", 8) != "你好" {
+		t.Fatal("short text should pass through")
+	}
+}
 
 func TestViewerLogKeepsDecisionPath(t *testing.T) {
 	keep := []string{
