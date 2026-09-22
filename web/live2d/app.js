@@ -347,13 +347,7 @@
   }
 
   function grabSelf() {
-    if (!app || !app.renderer || !app.renderer.extract) return;
-    let src;
-    try {
-      src = app.renderer.extract.canvas(app.stage);
-    } catch (err) {
-      return;
-    }
+    const src = document.getElementById("stage");
     if (!src || src.width < 2 || src.height < 2) return;
     const max = 720;
     let w = src.width;
@@ -997,6 +991,7 @@
       resizeTo: window,
       backgroundColor: 0x14110e,
       antialias: true,
+      preserveDrawingBuffer: true,
     });
     setStatus("loading Haru…");
     model = await PIXI.live2d.Live2DModel.from(MODEL);

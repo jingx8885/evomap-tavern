@@ -150,7 +150,11 @@ func TestReadBodyAndFelt(t *testing.T) {
 	if Writable("internal/judge/judge.go") || Writable("internal/agent/agent.go") || Writable("internal/desk/loop.go") || Writable("internal/livevoice/session.go") {
 		t.Fatal("safety latches must stay read-only")
 	}
-	b.Set(func(l *Live) { l.Camera = "对面有个人"; l.Screen = "在写代码"; l.Shot = "短发，表情平静" })
+	b.Set(func(l *Live) {
+		l.Camera = "对面有个人"
+		l.Screen = "在写代码"
+		l.Shot = "短发，表情平静"
+	})
 	camAsk := b.Felt(p, Ask{Kind: AskCamera}, "")
 	if !strings.Contains(camAsk, "对面有个人") || strings.Contains(camAsk, "在写代码") || strings.Contains(camAsk, "短发") {
 		t.Fatalf("camera ask %q", camAsk)

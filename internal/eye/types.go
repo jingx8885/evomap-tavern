@@ -62,15 +62,15 @@ type Sight struct {
 
 // Options configure on-demand eyes. Nothing here starts a clock.
 type Options struct {
-	Camera  bool
-	Screen  bool
+	Camera   bool
+	Screen   bool
 	Grab     func(ctx context.Context) bool                // ask the viewer for one camera JPEG; false means do not wait
 	GrabShot func(ctx context.Context) bool                // ask the viewer for one screenshot of her own face
 	Observe  func(ctx context.Context) (ScreenView, error) // computer-use glance; tests inject
-	Jev     Evaluator
-	LLM     Visioner
-	LogFn   func(string)
-	OnSight func(Sight)
+	Jev      Evaluator
+	LLM      Visioner
+	LogFn    func(string)
+	OnSight  func(Sight)
 }
 
 // ScreenView is what computer-use observation reports. No JPEG.

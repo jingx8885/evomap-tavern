@@ -116,8 +116,9 @@ type deferredNote struct {
 	text    string
 }
 
-// ErrHeld means the note was not injected into the live line.
-// Steer drops it. Nudge keeps commentary and sends it when the line ends.
+// ErrHeld means a commentary nudge was not injected into the live line.
+// It waits until she is quiet, because that channel asks her to speak.
+// Developer steering is quiet context and is never held.
 var ErrHeld = errors.New("not injected into the live line")
 
 // speechTail is how long after the latest downlink voice the line
@@ -842,16 +843,14 @@ func (s *Session) Respond() error {
 }
 
 // Steer pushes behavioral guidance through the developer channel.
-// Upstream rejects session.update for instructions after initialization,
-// so the note is silent developer context. It has to land while she is
-// quiet, before this reply starts. A line already open drops the note:
-// appending developer context after the line still opens another turn.
+// Upstream rejects session.update for instructions after initialization.
+// This channel is quiet context: the model may use it on a later reply,
+// and appending it does not ask her to speak or open another turn.
+// Send it while she is already talking. Holding it until the line ends
+// just drops the note she needed for this exchange.
 func (s *Session) Steer(guidance string) error {
 	if strings.TrimSpace(guidance) == "" {
 		return nil
-	}
-	if s.Speaking() {
-		return ErrHeld
 	}
 	return s.sendContext("developer", guidance)
 }
@@ -871,6 +870,7 @@ func (s *Session) Speaking() bool {
 
 // SetNote receives lines the session wants on the agent log,
 // such as a commentary nudge delivered after the line.
+// Developer steering is not deferred.
 func (s *Session) SetNote(fn func(string)) {
 	s.noteMu.Lock()
 	s.noteFn = fn
@@ -976,8 +976,13 @@ func (s *Session) flushDeferred() {
 	}
 	s.deferMu.Unlock()
 	for _, item := range batch {
+		// Only commentary is queued. A developer note here is quiet
+		// context that should have been sent immediately; deliver it
+		// without treating the flush as a new spoken turn.
 		if item.channel == "developer" {
-			s.note("[steer] dropped")
+			if err := s.sendContext(item.channel, item.text); err != nil {
+				s.note(fmt.Sprintf("[steer] failed: %v", err))
+			}
 			continue
 		}
 		text := item.text

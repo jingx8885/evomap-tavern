@@ -790,9 +790,9 @@ func (s *capabilitySlot) endComputer(gen int) {
 // processTurn runs the one turn Jev, steering, then the capability that Jev picked.
 // Partial transcripts do not call Jev. turn.done does, at most once per jevMinInterval.
 // Tool side effects run only after a successful final judgment.
-// Steering and branch notes share one voice inject. If she is already
-// speaking, that inject waits until the line ends; if she has not
-// started, it lands first and the reply uses it. Neither cuts the other.
+// Steering and branch notes share one developer inject. It is quiet
+// context and lands even if she is already speaking. Commentary is the
+// channel that asks her to talk, and that one waits out the current line.
 func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 	jc *jev.Client, lc *llm.Client, mem *memory.Memory, pl *planner.Planner,
 	sess *livevoice.Session, gate *jevGate, slot *capabilitySlot, userText string, final bool) {
@@ -898,8 +898,9 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 			}
 			// The gateway rejects one append over 500 tokens. The scene
 			// note and the observation (log, camera, screen) go separately
-			// so neither one crowds the other out. A line already playing
-			// drops both: a late developer append opens another turn.
+			// so neither one crowds the other out. Both are developer
+			// context: send them while she is speaking. That channel does
+			// not open another turn.
 			if err := sess.Steer(livevoice.FitHead(note)); errors.Is(err, livevoice.ErrHeld) {
 				opt.log("[steer] skipped mode=%s", mode)
 				opt.sense.Emit(sense.Event{Kind: sense.KindSteer, Summary: mode})

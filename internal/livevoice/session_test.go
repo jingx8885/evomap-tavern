@@ -140,7 +140,7 @@ func TestClipUplinkQueueKeepsTheLiveTail(t *testing.T) {
 	}
 }
 
-func TestSteerDuringSpeechIsDropped(t *testing.T) {
+func TestSteerDuringSpeechIsSent(t *testing.T) {
 	s := &Session{}
 	var sent []string
 	s.contextSend = func(channel, text string) error {
@@ -151,17 +151,20 @@ func TestSteerDuringSpeechIsDropped(t *testing.T) {
 	if !s.Speaking() {
 		t.Fatal("assistant transcript should hold the line open")
 	}
-	if err := s.Steer("Stay in character. mode=continue"); !errors.Is(err, ErrHeld) {
+	if err := s.Steer("Stay in character. mode=continue"); err != nil {
 		t.Fatalf("steer while speaking: %v", err)
 	}
-	if err := s.Steer("You are still on reflect."); !errors.Is(err, ErrHeld) {
+	if err := s.Steer("You are still on reflect."); err != nil {
 		t.Fatalf("second steer: %v", err)
 	}
 	if err := s.Nudge("The coins are down. Say one short line."); !errors.Is(err, ErrHeld) {
 		t.Fatalf("nudge while speaking: %v", err)
 	}
-	if len(sent) != 0 {
+	if len(sent) != 2 {
 		t.Fatalf("injected during the line: %v", sent)
+	}
+	if sent[0] != "developer:Stay in character. mode=continue" || sent[1] != "developer:You are still on reflect." {
+		t.Fatalf("developer notes: %v", sent)
 	}
 	s.handleEvent([]byte(`{"type":"turn.done","role":"user","transcript":"再说一句"}`))
 	if !s.Speaking() {
@@ -176,11 +179,11 @@ func TestSteerDuringSpeechIsDropped(t *testing.T) {
 	}
 	s.deferMu.Unlock()
 	s.flushDeferred()
-	if len(sent) != 1 {
-		t.Fatalf("sent %d notes, want only the nudge: %v", len(sent), sent)
+	if len(sent) != 3 {
+		t.Fatalf("sent %d notes, want two steers plus the nudge: %v", len(sent), sent)
 	}
-	if sent[0] != "commentary:The coins are down. Say one short line." {
-		t.Fatalf("late note: %s", sent[0])
+	if sent[2] != "commentary:The coins are down. Say one short line." {
+		t.Fatalf("late note: %s", sent[2])
 	}
 }
 

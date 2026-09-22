@@ -57,7 +57,7 @@ Jev 是 System One。一次请求 = 一份 `state` + 一组 typed `questions`，
 | emotion | choice | joy/sadness/anger/fear/surprise/disgust/neutral/other |
 | engagement | score | 还在聊还是在抽离 |
 | need_llm | noul | 慢思考有多需要。`act` 缺省时才用它回退到 plan |
-| act | choice | 总入口：none / plan / computer_use / camera / screen / look / divine 等。一轮只启动一个。`camera` 只看镜头，`screen` 只看电脑窗口。`divine` 是八卦六爻，用户说算命才进 |
+| act | choice | 总入口：none / plan / computer_use / camera / screen / shot / look / divine 等。一轮只启动一个。`camera` 只看镜头，`screen` 只看电脑窗口标题，`shot` 只截她自己舞台上的样子。`divine` 是八卦六爻，用户说算命才进 |
 | safety | noul | 可选；过阈值进 `safety` 模式 |
 | persona_fit | noul | 可选；助手上一句是否贴人设 |
 
@@ -151,6 +151,7 @@ LLM 输出约定：planner / desk 文本都走严格 JSON（`note` 或 `text`）
 | `/look <文件>` | 读允许名单内的源码，再 steer 体感 | sense + developer |
 | `/camera` | 只看摄像头这一帧 | eye + developer |
 | `/screen` | 只看电脑窗口（computer-use，不是截图像素） | eye + developer |
+| `/shot` | 截一张她自己舞台上的样子，再交给视觉模型 | eye + developer |
 | `/sense` | 打印自我快照，并按“身体”提问注入体感 | sense + developer |
 | `/stage` | 打开她的页面。`image`/`video`/`speech`/`song`/`llm` 入队，`decorate` 改装饰，`control` 加控件 | 窗口模块；装饰和控件由慢模型写 JSON，Go 校验后贴上 |
 | `/desk <目标>` | Jev 驱动的本机电脑使用 | Jev 选题 → LLM 必要时写文本 → Go 执行 |
@@ -187,6 +188,7 @@ Allowlist，不在表里的事直接 `blocked`。`safe_to_act` < 0.45、confiden
 `internal/sense`：她能感觉自己的声音、脸、心情、以及构成她的源码。不是给双工挂的 function calling。
 
 - 事件：`voice` / `turn` / `judge` / `steer` / `plan` / `desk` / `make` / `stage` / `avatar` / `look` / `see` / `command` / `error` / `warning`
+- 看自己的样子走 `shot`：Live2D 舞台画布截一张图，视觉模型只描述这张脸上的头发、表情、衣服。不看桌面像素，也不看镜头。
 - 读文件有 allow/deny（`cmd/` `internal/` `personas/` `docs/` 等；拒绝 `.git/`、模型素材、`.env`、二进制）
 - 用户问“你是谁 / 感觉得到自己吗 / 源码”时，`ParseAsk` + `Felt` 往 steering 叠一句体感，仍走 developer，由双工用人设说出来
 - 自我 ReAct（`internal/react`）接在 `reflect` / `look` / `codex` 上，异步、不挡语音。内层 Jev 闭集选题：`notice` 只感觉，`read` 按白名单再读一处，`remember` 由慢模型写一条记忆 JSON 后 Go 写入关系记忆，`change` 只在她被要求改自己且不在 safety 时出现。`change` 的慢模型只出 `{why,change}`，路径必须落在可写白名单（人设，以及 sense、steering、planner、memory、avatar、window、oracle、eye、Live2D 页面）。`judge` / `agent` / `desk` / `livevoice` / `jev` 这些安全闩可读不可写。Go 用这份意图调 Codex，写完核对工作区，越界的文件改回去。她感觉到的是磁盘上的差异；正在跑的进程仍是上一版，不会热替换。
