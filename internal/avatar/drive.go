@@ -78,7 +78,7 @@ func Drive(mode string, j *judge.Judgment, a memory.Affect) Frame {
 		f.Arousal = a.Arousal
 	}
 	f.Expression = expressionFor(mode, j)
-	f.MotionGroup, f.MotionIndex = motionFor(mode, f.Arousal)
+	f.MotionGroup, f.MotionIndex = motionFor(mode, j)
 	f.LookAt = clamp01(j.Engagement)
 	if f.LookAt == 0 {
 		f.LookAt = 0.55
@@ -134,25 +134,134 @@ func expressionFor(mode string, j *judge.Judgment) string {
 	return ExpNeutral
 }
 
-func motionFor(mode string, arousal float64) (string, int) {
-	switch mode {
-	case "celebrate":
-		return "TapBody", 3 // special_01
-	case "re_engage":
-		return "TapBody", 0
-	case "safety", "comfort", "de_escalate":
-		return "Idle", 0
-	case "goal_push":
-		if arousal > 0.6 {
-			return "TapBody", 1
-		}
-		return "Idle", 1
-	default:
-		if arousal > 0.75 {
-			return "TapBody", 2
-		}
-		return "Idle", 0
+// Haru motion catalog. Order matches Haru.model3.json.
+// Idle stays small so the viewer's automatic idle loop does not flail.
+// Sway is torso and head. TapBody is the arm and hand gestures.
+// The first four TapBody clips keep the previous order.
+var motionCatalog = map[string][]string{
+	"Idle": {
+		"motions/haru_g_idle.motion3.json",
+		"motions/haru_g_m02.motion3.json",
+		"motions/haru_g_m05.motion3.json",
+		"motions/haru_g_m03.motion3.json",
+		"motions/haru_g_m04.motion3.json",
+	},
+	"Sway": {
+		"motions/haru_g_m15.motion3.json",
+		"motions/haru_g_m11.motion3.json",
+		"motions/haru_g_m13.motion3.json",
+		"motions/haru_g_m17.motion3.json",
+		"motions/haru_g_m18.motion3.json",
+		"motions/haru_g_m19.motion3.json",
+		"motions/haru_g_m08.motion3.json",
+		"motions/haru_g_m14.motion3.json",
+		"motions/haru_g_m25.motion3.json",
+	},
+	"TapBody": {
+		"motions/haru_g_m26.motion3.json",
+		"motions/haru_g_m06.motion3.json",
+		"motions/haru_g_m20.motion3.json",
+		"motions/haru_g_m09.motion3.json",
+		"motions/haru_g_m01.motion3.json",
+		"motions/haru_g_m07.motion3.json",
+		"motions/haru_g_m10.motion3.json",
+		"motions/haru_g_m12.motion3.json",
+		"motions/haru_g_m16.motion3.json",
+		"motions/haru_g_m21.motion3.json",
+		"motions/haru_g_m22.motion3.json",
+		"motions/haru_g_m23.motion3.json",
+		"motions/haru_g_m24.motion3.json",
+	},
+}
+
+func motionFor(mode string, j *judge.Judgment) (string, int) {
+	if j == nil {
+		j = &judge.Judgment{Emotion: "neutral"}
 	}
+	self := selfEmotion(j)
+	switch mode {
+	case "safety":
+		return "Idle", pick([]int{0, 1, 2, 3, 4}, j)
+	case "comfort":
+		return "Sway", pick([]int{0, 1, 2, 3}, j)
+	case "de_escalate":
+		return "Sway", pick([]int{4, 5, 6}, j)
+	case "re_engage":
+		return "TapBody", pick([]int{0, 4, 8}, j)
+	case "celebrate":
+		return "TapBody", pick([]int{3, 6, 9, 12}, j)
+	case "goal_push":
+		if j.Arousal > 0.6 {
+			return "TapBody", pick([]int{1, 5, 7, 11}, j)
+		}
+		return "Sway", pick([]int{7, 8}, j)
+	default:
+		switch self {
+		case "joy":
+			if j.Arousal > 0.55 {
+				return "TapBody", pick([]int{2, 10}, j)
+			}
+			return "Sway", pick([]int{0, 7}, j)
+		case "surprise":
+			return "TapBody", pick([]int{2, 10, 12}, j)
+		case "anger", "disgust":
+			if j.Arousal > 0.55 {
+				return "TapBody", pick([]int{1, 8, 11}, j)
+			}
+			return "Sway", pick([]int{4, 6}, j)
+		case "sadness", "fear":
+			return "Sway", pick([]int{2, 3, 5, 8}, j)
+		default:
+			if j.Arousal > 0.75 {
+				return "TapBody", pick([]int{2, 10}, j)
+			}
+			if j.Arousal > 0.45 {
+				return "Sway", pick([]int{1, 5, 7}, j)
+			}
+			return "Idle", pick([]int{0, 1, 2, 3, 4}, j)
+		}
+	}
+}
+
+func selfEmotion(j *judge.Judgment) string {
+	if j == nil {
+		return "neutral"
+	}
+	self := strings.ToLower(strings.TrimSpace(j.SelfEmotion))
+	if self == "" {
+		self = strings.ToLower(strings.TrimSpace(j.Emotion))
+	}
+	if self == "" {
+		return "neutral"
+	}
+	return self
+}
+
+func pick(pool []int, j *judge.Judgment) int {
+	if len(pool) == 0 {
+		return 0
+	}
+	shift := 0
+	switch selfEmotion(j) {
+	case "joy":
+		shift = 1
+	case "surprise":
+		shift = 2
+	case "sadness":
+		shift = 3
+	case "fear":
+		shift = 4
+	case "anger":
+		shift = 5
+	case "disgust":
+		shift = 6
+	}
+	raw := clamp01(j.Arousal*0.72 + math.Abs(j.Valence-0.5)*0.56)
+	base := int(raw * float64(len(pool)))
+	if base >= len(pool) {
+		base = len(pool) - 1
+	}
+	return pool[(base+shift)%len(pool)]
 }
 
 func intensityFromScores(j *judge.Judgment) float64 {

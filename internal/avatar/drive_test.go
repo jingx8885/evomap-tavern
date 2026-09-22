@@ -1,6 +1,10 @@
 package avatar
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jingx8885/lov-evo/internal/judge"
@@ -14,8 +18,11 @@ func TestDriveComfortUsesSoftFace(t *testing.T) {
 	if f.Expression != ExpSoft {
 		t.Fatalf("comfort expression %s", f.Expression)
 	}
-	if f.MotionGroup != "Idle" {
-		t.Fatalf("comfort should idle, got %s", f.MotionGroup)
+	if f.MotionGroup != "Sway" {
+		t.Fatalf("comfort should sway, got %s", f.MotionGroup)
+	}
+	if f.MotionIndex < 0 || f.MotionIndex >= len(motionCatalog["Sway"]) {
+		t.Fatalf("comfort motion index %d", f.MotionIndex)
 	}
 	if f.LookAt != 0.8 {
 		t.Fatalf("look_at %v", f.LookAt)
@@ -84,6 +91,96 @@ func TestDriveOverlayHoldsEmotion(t *testing.T) {
 	celeb := Drive("celebrate", &judge.Judgment{Emotion: "joy", Valence: 0.9, Arousal: 0.7}, memory.Affect{})
 	if celeb.Params["ParamTere"] < 0.4 || celeb.Params["ParamMouthForm"] < 0.3 {
 		t.Fatalf("joy overlay %+v", celeb.Params)
+	}
+}
+
+func TestEveryHaruMotionIsReachable(t *testing.T) {
+	root := filepath.Join("..", "..", "web", "live2d", "models", "Haru")
+	raw, err := os.ReadFile(filepath.Join(root, "Haru.model3.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var model struct {
+		FileReferences struct {
+			Motions map[string][]struct {
+				File string `json:"File"`
+			} `json:"Motions"`
+		} `json:"FileReferences"`
+	}
+	if err := json.Unmarshal(raw, &model); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.FileReferences.Motions) != len(motionCatalog) {
+		t.Fatalf("model groups %d catalog %d", len(model.FileReferences.Motions), len(motionCatalog))
+	}
+	seen := map[string]string{}
+	for group, files := range motionCatalog {
+		got := model.FileReferences.Motions[group]
+		if len(got) != len(files) {
+			t.Fatalf("%s model %d catalog %d", group, len(got), len(files))
+		}
+		for i, want := range files {
+			if got[i].File != want {
+				t.Fatalf("%s[%d] model %s catalog %s", group, i, got[i].File, want)
+			}
+			if prev, ok := seen[want]; ok {
+				t.Fatalf("%s registered in %s and %s", want, prev, group)
+			}
+			seen[want] = group
+			path := filepath.Join(root, filepath.FromSlash(want))
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("missing %s: %v", want, err)
+			}
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "motions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ent := range entries {
+		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".motion3.json") {
+			continue
+		}
+		rel := "motions/" + ent.Name()
+		if _, ok := seen[rel]; !ok {
+			t.Fatalf("motion file not registered: %s", rel)
+		}
+		delete(seen, rel)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("catalog entries missing on disk: %v", seen)
+	}
+
+	hit := map[string]map[int]bool{}
+	for group, files := range motionCatalog {
+		hit[group] = map[int]bool{}
+		for i := range files {
+			hit[group][i] = false
+		}
+	}
+	emotions := []string{"neutral", "joy", "surprise", "sadness", "fear", "anger", "disgust"}
+	modes := []string{"continue", "comfort", "de_escalate", "celebrate", "re_engage", "goal_push", "safety"}
+	for _, mode := range modes {
+		for _, emo := range emotions {
+			for _, arousal := range []float64{0, 0.3, 0.5, 0.65, 0.8, 1} {
+				for _, valence := range []float64{0.1, 0.5, 0.9} {
+					j := &judge.Judgment{Emotion: emo, SelfEmotion: emo, Arousal: arousal, Valence: valence}
+					group, index := motionFor(mode, j)
+					files := motionCatalog[group]
+					if index < 0 || index >= len(files) {
+						t.Fatalf("%s %s arousal %.2f -> %s[%d] out of range", mode, emo, arousal, group, index)
+					}
+					hit[group][index] = true
+				}
+			}
+		}
+	}
+	for group, files := range motionCatalog {
+		for i, file := range files {
+			if !hit[group][i] {
+				t.Fatalf("unreachable %s[%d] %s", group, i, file)
+			}
+		}
 	}
 }
 

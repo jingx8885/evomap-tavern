@@ -40,6 +40,7 @@
   let app;
   let model;
   let lastMode = "";
+  let lastMotion = "";
   let lastExpression = "";
   let lastDrive = { params: {} };
   let mouthTarget = 0;
@@ -275,13 +276,14 @@
     renderHud(frame);
     await applyExpression(frame.expression);
     const group = frame.motion_group || "Idle";
-    const index = frame.motion_index || 0;
-    const sameIdle = group === "Idle" && lastMode === frame.mode;
-    if (!sameIdle) {
+    const index = Number.isFinite(frame.motion_index) ? frame.motion_index : 0;
+    const motionKey = group + ":" + index;
+    if (motionKey !== lastMotion) {
       try {
         await model.motion(group, index);
+        lastMotion = motionKey;
       } catch (err) {
-        console.warn("motion", err);
+        console.warn("motion", group, index, err);
       }
     }
     lastMode = frame.mode;
