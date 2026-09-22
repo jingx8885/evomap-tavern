@@ -46,9 +46,13 @@ type Live struct {
 	MakeStatus   string        `json:"make_status,omitempty"`
 	MakeProgress float64       `json:"make_progress,omitempty"`
 	MakeFile     string        `json:"make_file,omitempty"`
+	StageOpen    bool          `json:"stage_open,omitempty"`
+	StageLayout  string        `json:"stage_layout,omitempty"`
+	StageGlance  string        `json:"stage_glance,omitempty"`
 	PerceptKind  string        `json:"percept_kind,omitempty"`
 	PerceptFile  string        `json:"percept_file,omitempty"`
 	Percept      string        `json:"percept,omitempty"`
+	SelfNote     string        `json:"self_note,omitempty"`
 }
 
 // Snapshot is the full self-picture: who, now, body map, recent events.

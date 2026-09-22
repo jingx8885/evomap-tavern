@@ -314,9 +314,6 @@
   let liveWS = null;
   let camVideo = null;
   let camStream = null;
-  let eyeTimer = null;
-  let eyesOn = true;
-  let eyesBusy = false;
 
   function sendEye(dataURL) {
     const payload = JSON.stringify({ type: "eye", source: "camera", data: dataURL });
@@ -332,7 +329,7 @@
   }
 
   function grabCamera() {
-    if (!eyesOn || !camVideo || camVideo.videoWidth < 2) return;
+    if (!camVideo || camVideo.videoWidth < 2) return;
     const max = 480;
     let w = camVideo.videoWidth;
     let h = camVideo.videoHeight;
@@ -347,21 +344,47 @@
     sendEye(canvas.toDataURL("image/jpeg", 0.55));
   }
 
-  function ensureEyeTick() {
-    if (eyeTimer) return;
-    eyeTimer = setInterval(function () {
-      if (camVideo) grabCamera();
-      else {
-        clearInterval(eyeTimer);
-        eyeTimer = null;
-      }
-    }, 2000);
+  const FOLD_KEY = "lov-evo-panel-fold";
+  const foldDefault = { cam: true };
+
+  function readFolds() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(FOLD_KEY) || "{}");
+      return raw && typeof raw === "object" ? raw : {};
+    } catch (err) {
+      return {};
+    }
+  }
+
+  function setFold(panel, folded, persist) {
+    if (!panel) return;
+    panel.classList.toggle("folded", !!folded);
+    const btn = panel.querySelector(":scope > header .fold");
+    if (btn) btn.setAttribute("aria-expanded", folded ? "false" : "true");
+    if (!persist || !panel.id) return;
+    const saved = readFolds();
+    saved[panel.id] = !!folded;
+    localStorage.setItem(FOLD_KEY, JSON.stringify(saved));
+  }
+
+  function bindFolds() {
+    const saved = readFolds();
+    document.querySelectorAll(".panel").forEach(function (panel) {
+      const known = Object.prototype.hasOwnProperty.call(saved, panel.id);
+      setFold(panel, known ? !!saved[panel.id] : !!foldDefault[panel.id], false);
+      const btn = panel.querySelector(":scope > header .fold");
+      if (!btn) return;
+      btn.addEventListener("click", function () {
+        setFold(panel, !panel.classList.contains("folded"), true);
+      });
+    });
   }
 
   function setCameraOn(on) {
     const box = document.getElementById("cam");
     const btn = document.getElementById("eye-cam-btn");
     if (box) box.classList.toggle("on", on);
+    if (on) setFold(box, false, true);
     if (btn) {
       btn.classList.toggle("active", on);
       btn.textContent = on ? "关闭" : "打开";
@@ -403,7 +426,6 @@
         });
       }
       setCameraOn(true);
-      ensureEyeTick();
       setStatus("camera on");
     } catch (err) {
       stopCamera();
@@ -411,70 +433,422 @@
     }
   }
 
-  function paintEyeSwitch(available) {
-    const btn = document.getElementById("eye-loop-btn");
+  function bindEyes() {
+    const cam = document.getElementById("eye-cam-btn");
+    if (cam) cam.addEventListener("click", function () { toggleCamera(); });
+  }
+
+  let systemOn = true;
+  let systemBusy = false;
+
+  function paintPower(available) {
+    const btn = document.getElementById("power-btn");
     if (!btn) return;
     if (available === false) {
       btn.disabled = true;
-      btn.classList.remove("active");
-      btn.textContent = "无观察";
+      btn.classList.remove("on");
+      btn.classList.add("off");
+      btn.textContent = "未接线";
       return;
     }
     btn.disabled = false;
-    btn.classList.toggle("active", eyesOn);
-    btn.textContent = eyesOn ? "观察开" : "观察关";
+    btn.classList.toggle("on", systemOn);
+    btn.classList.toggle("off", !systemOn);
+    btn.textContent = systemOn ? "运行中" : "已暂停";
   }
 
-  async function syncEyes() {
-    if (eyesBusy) return;
+  async function syncPower() {
+    if (systemBusy) return;
     try {
-      const r = await fetch("/api/eyes");
+      const r = await fetch("/api/system");
       if (!r.ok) return;
       const body = await r.json();
       if (body && body.available === false) {
-        paintEyeSwitch(false);
+        paintPower(false);
         return;
       }
       if (body && typeof body.on === "boolean") {
-        eyesOn = body.on;
-        paintEyeSwitch(true);
-        if (eyesOn && camVideo) ensureEyeTick();
+        systemOn = body.on;
+        paintPower(true);
       }
     } catch (e) {}
   }
 
-  async function toggleEyes() {
-    if (eyesBusy) return;
-    const next = !eyesOn;
-    eyesBusy = true;
+  async function togglePower() {
+    if (systemBusy) return;
+    const next = !systemOn;
+    systemBusy = true;
     try {
-      const r = await fetch("/api/eyes", {
+      const r = await fetch("/api/system", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ on: next }),
       });
       if (!r.ok) {
-        setStatus("观察开关失败 " + r.status);
+        setStatus("总开关失败 " + r.status);
         return;
       }
       const body = await r.json();
-      eyesOn = !!(body && body.on);
-      paintEyeSwitch(true);
-      if (eyesOn && camVideo) ensureEyeTick();
-      setStatus(eyesOn ? "观察开" : "观察关，后台不再打模型");
+      systemOn = !!(body && body.on);
+      paintPower(true);
+      setStatus(systemOn ? "运行中" : "已暂停，语音和判断都停了");
     } catch (err) {
-      setStatus("观察开关 " + err);
+      setStatus("总开关 " + err);
     } finally {
-      eyesBusy = false;
+      systemBusy = false;
     }
   }
 
-  function bindEyes() {
-    const cam = document.getElementById("eye-cam-btn");
-    if (cam) cam.addEventListener("click", function () { toggleCamera(); });
-    const loop = document.getElementById("eye-loop-btn");
-    if (loop) loop.addEventListener("click", function () { toggleEyes(); });
-    syncEyes();
+  function bindPower() {
+    const btn = document.getElementById("power-btn");
+    if (btn) btn.addEventListener("click", function () { togglePower(); });
+    syncPower();
+    setInterval(syncPower, 2000);
+  }
+
+  const MEMORY_LABEL = {
+    open_loop: "还记着",
+    promise: "答应",
+    shared_event: "经历",
+    inside_joke: "梗",
+    topic: "话题",
+  };
+  let memoryEditing = "";
+  let memoryQuiet = false;
+  let memoryStamp = "";
+  let memoryGen = 0;
+
+  function memoryLocked() {
+    if (memoryEditing || memoryQuiet) return true;
+    const root = document.getElementById("memory");
+    return !!(root && document.activeElement && root.contains(document.activeElement));
+  }
+
+  function paintMemoryError(text) {
+    memoryStamp = "";
+    const meta = document.getElementById("memory-meta");
+    if (!meta) return;
+    meta.classList.add("bad");
+    meta.textContent = text || "没记住";
+  }
+
+  function memorySignature(view) {
+    const items = (view && view.items) || [];
+    return JSON.stringify({
+      available: !!(view && view.available),
+      stage: (view && view.stage) || "",
+      summary: (view && view.summary) || "",
+      editing: memoryEditing,
+      items: items.map(function (item) {
+        return (item.id || "") + "\n" + (item.kind || "") + "\n" + (item.text || "");
+      }),
+    });
+  }
+
+  function paintMemory(view) {
+    const meta = document.getElementById("memory-meta");
+    const summary = document.getElementById("memory-summary");
+    const list = document.getElementById("memory-list");
+    if (!list || !meta) return;
+    view = view || {};
+    const stamp = memorySignature(view);
+    if (stamp === memoryStamp) return;
+    memoryStamp = stamp;
+    meta.classList.remove("bad");
+    if (!view.available) {
+      meta.textContent = "未接线";
+      if (summary) summary.textContent = "";
+      list.innerHTML = "";
+      const empty = document.createElement("li");
+      empty.className = "mem-empty";
+      empty.textContent = "这次运行没有记忆文件。";
+      list.appendChild(empty);
+      return;
+    }
+    const items = view.items || [];
+    meta.textContent = (view.stage || "—") + " · " + items.length + " 条";
+    if (summary) summary.textContent = view.summary || "";
+    list.innerHTML = "";
+    if (!items.length) {
+      const empty = document.createElement("li");
+      empty.className = "mem-empty";
+      empty.textContent = "她还没记下什么。";
+      list.appendChild(empty);
+      return;
+    }
+    items.forEach(function (item) {
+      const li = document.createElement("li");
+      const kind = document.createElement("span");
+      kind.className = "mem-kind";
+      kind.textContent = MEMORY_LABEL[item.kind] || item.kind;
+      const text = document.createElement("div");
+      text.className = "mem-text";
+      const actions = document.createElement("div");
+      actions.className = "mem-actions";
+      if (memoryEditing === item.id) {
+        const input = document.createElement("input");
+        input.value = item.text || "";
+        input.maxLength = 80;
+        text.appendChild(input);
+        const save = document.createElement("button");
+        save.type = "button";
+        save.textContent = "存";
+        save.addEventListener("click", function () {
+          postMemory({ op: "update", id: item.id, text: input.value });
+        });
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.textContent = "取消";
+        cancel.addEventListener("click", function () {
+          memoryEditing = "";
+          syncMemory();
+        });
+        actions.append(save, cancel);
+        li.append(kind, text, actions);
+        list.appendChild(li);
+        input.focus();
+        return;
+      }
+      text.textContent = item.text || "";
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.textContent = "改";
+      edit.addEventListener("click", function () {
+        memoryEditing = item.id;
+        paintMemory(view);
+      });
+      const del = document.createElement("button");
+      del.type = "button";
+      del.textContent = "删";
+      del.addEventListener("click", function () {
+        if (del.dataset.confirm !== "1") {
+          del.dataset.confirm = "1";
+          del.classList.add("danger");
+          del.textContent = "确定";
+          memoryQuiet = true;
+          setTimeout(function () {
+            if (del.dataset.confirm === "1") {
+              del.dataset.confirm = "";
+              del.classList.remove("danger");
+              del.textContent = "删";
+              memoryQuiet = false;
+            }
+          }, 2500);
+          return;
+        }
+        memoryQuiet = false;
+        postMemory({ op: "delete", id: item.id });
+      });
+      actions.append(edit, del);
+      li.append(kind, text, actions);
+      list.appendChild(li);
+    });
+  }
+
+  async function postMemory(op) {
+    const gen = ++memoryGen;
+    try {
+      const r = await fetch("/api/memory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(op),
+      });
+      const body = await r.json().catch(function () { return {}; });
+      if (gen !== memoryGen) return;
+      if (!r.ok) {
+        paintMemoryError((body && body.error) || ("没记住 " + r.status));
+        return;
+      }
+      memoryEditing = "";
+      memoryQuiet = false;
+      paintMemory(body);
+    } catch (err) {
+      if (gen === memoryGen) paintMemoryError(String(err));
+    }
+  }
+
+  async function syncMemory() {
+    if (memoryLocked()) return;
+    const gen = memoryGen;
+    try {
+      const r = await fetch("/api/memory");
+      if (!r.ok || gen !== memoryGen) return;
+      paintMemory(await r.json());
+    } catch (e) {}
+  }
+
+  const QUEUE_KIND = {
+    image: "图",
+    video: "视频",
+    speech: "语音",
+    song: "歌",
+    llm: "笔记",
+  };
+  const QUEUE_STATUS = {
+    queued: "排队",
+    running: "在做",
+    ready: "好了",
+    failed: "失败",
+    canceled: "取消",
+  };
+  let queueStamp = "";
+
+  function queueSignature(view) {
+    const items = (view && view.jobs) || [];
+    return JSON.stringify({
+      available: !!(view && view.available),
+      open: !!(view && view.open),
+      feature: (view && view.feature) || "",
+      media: (view && view.media) || "",
+      jobs: items.map(function (job) {
+        return [
+          job.id, job.kind, job.status, job.ratio, job.prompt,
+          job.file, job.text, job.err, job.look,
+        ].join("\n");
+      }),
+    });
+  }
+
+  function queueMedia(view, file) {
+    const base = String((view && view.media) || "").replace(/\/$/, "");
+    if (!file || !/^https?:\/\//i.test(base)) return "";
+    return base + "/media/" + encodeURIComponent(file);
+  }
+
+  function paintQueue(view) {
+    const meta = document.getElementById("queue-meta");
+    const list = document.getElementById("queue-list");
+    if (!meta || !list) return;
+    view = view || {};
+    const stamp = queueSignature(view);
+    if (stamp === queueStamp) return;
+    queueStamp = stamp;
+    const jobs = view.jobs || [];
+    if (!view.available) {
+      meta.textContent = "未接线";
+      list.innerHTML = "";
+      const empty = document.createElement("li");
+      empty.className = "q-empty";
+      empty.textContent = "这次运行没有任务队列。";
+      list.appendChild(empty);
+      return;
+    }
+    const running = jobs.filter(function (job) { return job.status === "running"; }).length;
+    const where = view.open ? "开着" : "合上";
+    if (!jobs.length) {
+      meta.textContent = where + " · 空";
+    } else if (running) {
+      meta.textContent = where + " · " + running + " 在做";
+    } else {
+      meta.textContent = where + " · " + jobs.length + " 条";
+    }
+    list.innerHTML = "";
+    if (!jobs.length) {
+      const empty = document.createElement("li");
+      empty.className = "q-empty";
+      empty.textContent = "队列是空的。";
+      list.appendChild(empty);
+      return;
+    }
+    jobs.forEach(function (job) {
+      const li = document.createElement("li");
+      li.className = job.status || "";
+      if (view.feature && job.id === view.feature) li.classList.add("on");
+      const head = document.createElement("div");
+      head.className = "q-head";
+      const kind = document.createElement("span");
+      kind.className = "q-kind";
+      kind.textContent = QUEUE_KIND[job.kind] || job.kind || "任务";
+      const status = document.createElement("span");
+      status.className = "q-status";
+      let label = QUEUE_STATUS[job.status] || job.status || "";
+      if (job.status === "running" && typeof job.ratio === "number") {
+        label += " " + Math.round(Math.max(0, Math.min(1, job.ratio)) * 100) + "%";
+      }
+      status.textContent = label;
+      head.append(kind, status);
+      const prompt = document.createElement("div");
+      prompt.className = "q-prompt";
+      prompt.textContent = job.prompt || "";
+      li.append(head, prompt);
+      const ratio = Math.max(0, Math.min(1, job.ratio || 0));
+      const bar = document.createElement("div");
+      bar.className = "q-bar";
+      const fill = document.createElement("i");
+      fill.style.width = Math.round(ratio * 100) + "%";
+      bar.appendChild(fill);
+      li.appendChild(bar);
+      const src = queueMedia(view, job.file);
+      if (src && job.kind === "image") {
+        const img = document.createElement("img");
+        img.className = "q-media";
+        img.alt = "";
+        img.src = src;
+        li.appendChild(img);
+      } else if (src && job.kind === "video") {
+        const video = document.createElement("video");
+        video.className = "q-media";
+        video.controls = true;
+        video.src = src;
+        li.appendChild(video);
+      } else if (src && (job.kind === "speech" || job.kind === "song")) {
+        const audio = document.createElement("audio");
+        audio.className = "q-media audio";
+        audio.controls = true;
+        audio.src = src;
+        li.appendChild(audio);
+      }
+      if (job.text) {
+        const note = document.createElement("div");
+        note.className = "q-note";
+        note.textContent = job.text;
+        li.appendChild(note);
+      }
+      if (job.err && job.status === "failed") {
+        const err = document.createElement("div");
+        err.className = "q-err";
+        err.textContent = job.err;
+        li.appendChild(err);
+      }
+      list.appendChild(li);
+    });
+  }
+
+  async function syncQueue() {
+    try {
+      const r = await fetch("/api/queue");
+      if (!r.ok) {
+        paintQueue({ available: false, jobs: [] });
+        return;
+      }
+      paintQueue(await r.json());
+    } catch (e) {
+      paintQueue({ available: false, jobs: [] });
+    }
+  }
+
+  function bindQueue() {
+    syncQueue();
+    setInterval(syncQueue, 2000);
+  }
+
+  function bindMemory() {
+    const form = document.getElementById("memory-add");
+    if (form) {
+      form.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        const kind = document.getElementById("memory-kind");
+        const text = document.getElementById("memory-text");
+        const value = text ? text.value : "";
+        postMemory({ op: "add", kind: kind ? kind.value : "", text: value }).then(function () {
+          if (text && !document.getElementById("memory-meta").classList.contains("bad")) {
+            text.value = "";
+          }
+        });
+      });
+    }
+    syncMemory();
+    setInterval(syncMemory, 2000);
   }
 
   function connectWS() {
@@ -500,6 +874,10 @@
           }
           if (msg && msg.type === "log") {
             appendLog(msg.at, msg.text);
+            return;
+          }
+          if (msg && msg.type === "capture") {
+            grabCamera();
             return;
           }
           applyDrive(msg);
@@ -567,6 +945,7 @@
   }
 
   async function main() {
+    bindFolds();
     if (traceList) {
       traceList.addEventListener("scroll", function () {
         traceStick = traceList.scrollHeight - traceList.scrollTop - traceList.clientHeight < 48;
@@ -574,7 +953,9 @@
     }
     connectWS();
     bindEyes();
-    setInterval(syncEyes, 2000);
+    bindPower();
+    bindQueue();
+    bindMemory();
     if (!window.PIXI || !PIXI.live2d) {
       setStatus("Cubism / Pixi runtime missing (CDN blocked?)");
       setConn("bad", "no runtime");

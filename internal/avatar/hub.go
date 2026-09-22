@@ -37,22 +37,26 @@ type LogLine struct {
 
 // Hub broadcasts drive frames to Live2D viewers.
 type Hub struct {
-	mu      sync.Mutex
-	clients map[*websocket.Conn]*client
-	last    Frame
-	logs    []LogLine
-	mouth   atomic.Uint64
-	mouthAt atomic.Int64
-	senseFn atomic.Value // func() any
-	eyeFn   atomic.Value // func(source string, jpegDataURL string)
-	eyesGet func() bool
-	eyesSet func(bool)
+	mu       sync.Mutex
+	clients  map[*websocket.Conn]*client
+	last     Frame
+	logs     []LogLine
+	mouth    atomic.Uint64
+	mouthAt  atomic.Int64
+	senseFn  atomic.Value // func() any
+	queueFn  atomic.Value // func() any
+	eyeFn    atomic.Value // func(source string, jpegDataURL string)
+	sysGet   func() bool
+	sysSet   func(bool)
+	memGet   func() memory.MemoryView
+	memApply func(memory.MemoryOp) (memory.MemoryView, error)
 }
 
 type client struct {
-	frames chan Frame
-	pcm    chan []byte
-	logs   chan LogLine
+	frames  chan Frame
+	pcm     chan []byte
+	logs    chan LogLine
+	capture chan struct{}
 }
 
 // NewHub creates an empty hub with a default idle frame.
@@ -180,16 +184,56 @@ func (h *Hub) SetEye(fn func(source, dataURL string)) {
 	h.eyeFn.Store(fn)
 }
 
-// SetEyes registers the background-vision switch. get reports the current
-// state; set pauses or resumes model calls.
-func (h *Hub) SetEyes(get func() bool, set func(bool)) {
+// SetQueue registers GET /api/queue. The payload is the stage queue
+// the companion viewer paints; nil means the queue is not wired.
+func (h *Hub) SetQueue(fn func() any) {
+	if h == nil || fn == nil {
+		return
+	}
+	h.queueFn.Store(fn)
+}
+
+// SetMemory registers the durable-memory viewer. get lists what she
+// remembers; apply adds, edits, or deletes one line.
+func (h *Hub) SetMemory(get func() memory.MemoryView, apply func(memory.MemoryOp) (memory.MemoryView, error)) {
 	if h == nil {
 		return
 	}
 	h.mu.Lock()
-	h.eyesGet = get
-	h.eyesSet = set
+	h.memGet = get
+	h.memApply = apply
 	h.mu.Unlock()
+}
+
+// SetSystem registers the run switch. get reports whether voice and
+// model work are live; set turns that whole run on or off.
+func (h *Hub) SetSystem(get func() bool, set func(bool)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.sysGet = get
+	h.sysSet = set
+	h.mu.Unlock()
+}
+
+// RequestCapture asks every viewer for one camera JPEG. There is no timer.
+func (h *Hub) RequestCapture() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	var chans []chan struct{}
+	for _, c := range h.clients {
+		chans = append(chans, c.capture)
+	}
+	h.mu.Unlock()
+	for _, ch := range chans {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // PCM pushes a downlink s16le 24kHz chunk to every viewer for WebAudio playback.
@@ -226,9 +270,101 @@ func (h *Hub) Handler(dir string) http.Handler {
 	mux.HandleFunc("/api/sense", h.serveSense)
 	mux.HandleFunc("/api/log", h.serveLog)
 	mux.HandleFunc("/api/eye", h.serveEye)
-	mux.HandleFunc("/api/eyes", h.serveEyes)
+	mux.HandleFunc("/api/system", h.serveSystem)
+	mux.HandleFunc("/api/memory", h.serveMemory)
+	mux.HandleFunc("/api/queue", h.serveQueue)
 	mux.HandleFunc("/drive", h.serveDrive)
 	return mux
+}
+
+func (h *Hub) systemState(set *bool) (bool, bool) {
+	if h == nil {
+		return false, false
+	}
+	h.mu.Lock()
+	get, setFn := h.sysGet, h.sysSet
+	h.mu.Unlock()
+	if get == nil || setFn == nil {
+		return false, false
+	}
+	if set != nil {
+		setFn(*set)
+	}
+	return get(), true
+}
+
+func (h *Hub) serveSystem(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	switch r.Method {
+	case http.MethodGet:
+		on, ok := h.systemState(nil)
+		json.NewEncoder(w).Encode(map[string]any{"on": on, "available": ok})
+	case http.MethodPost:
+		var in struct {
+			On bool `json:"on"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&in); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		on, ok := h.systemState(&in.On)
+		if !ok {
+			http.Error(w, "system down", http.StatusServiceUnavailable)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"on": on, "available": true})
+	default:
+		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Hub) serveMemory(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	h.mu.Lock()
+	get, apply := h.memGet, h.memApply
+	h.mu.Unlock()
+	if get == nil {
+		json.NewEncoder(w).Encode(memory.MemoryView{Items: []memory.MemoryItem{}})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		json.NewEncoder(w).Encode(get())
+	case http.MethodPost:
+		if apply == nil {
+			http.Error(w, "memory down", http.StatusServiceUnavailable)
+			return
+		}
+		var op memory.MemoryOp
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<14)).Decode(&op); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{"available": true, "error": "请求读不懂"})
+			return
+		}
+		view, err := apply(op)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{"available": true, "error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(view)
+	default:
+		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Hub) serveQueue(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fn, _ := h.queueFn.Load().(func() any)
+	if fn == nil {
+		json.NewEncoder(w).Encode(map[string]any{"available": false, "jobs": []any{}})
+		return
+	}
+	json.NewEncoder(w).Encode(fn())
 }
 
 func (h *Hub) serveSense(w http.ResponseWriter, r *http.Request) {
@@ -266,47 +402,6 @@ func (h *Hub) serveEye(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"ok": true})
-}
-
-func (h *Hub) eyesState(set *bool) (bool, bool) {
-	if h == nil {
-		return false, false
-	}
-	h.mu.Lock()
-	get, setFn := h.eyesGet, h.eyesSet
-	h.mu.Unlock()
-	if get == nil || setFn == nil {
-		return false, false
-	}
-	if set != nil {
-		setFn(*set)
-	}
-	return get(), true
-}
-
-func (h *Hub) serveEyes(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	switch r.Method {
-	case http.MethodGet:
-		on, ok := h.eyesState(nil)
-		json.NewEncoder(w).Encode(map[string]any{"on": on, "available": ok})
-	case http.MethodPost:
-		var in struct {
-			On bool `json:"on"`
-		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&in); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		on, ok := h.eyesState(&in.On)
-		if !ok {
-			http.Error(w, "eyes down", http.StatusServiceUnavailable)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]any{"on": on, "available": true})
-	default:
-		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
-	}
 }
 
 func (h *Hub) dispatchEye(source, dataURL string) bool {
@@ -364,9 +459,10 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cli := &client{
-		frames: make(chan Frame, 8),
-		pcm:    make(chan []byte, 64),
-		logs:   make(chan LogLine, 128),
+		frames:  make(chan Frame, 8),
+		pcm:     make(chan []byte, 64),
+		logs:    make(chan LogLine, 128),
+		capture: make(chan struct{}, 1),
 	}
 	h.mu.Lock()
 	h.clients[conn] = cli
@@ -407,6 +503,11 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 				}
 			case line := <-cli.logs:
 				if err := writeLog(conn, line); err != nil {
+					return
+				}
+			case <-cli.capture:
+				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				if err := conn.WriteJSON(map[string]any{"type": "capture"}); err != nil {
 					return
 				}
 			case chunk := <-cli.pcm:

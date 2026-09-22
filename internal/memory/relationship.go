@@ -256,6 +256,12 @@ func summarizeRelationship(r Relationship) string {
 	if len(r.InsideJokes) > 0 {
 		parts = append(parts, "内部梗: "+strings.Join(tail(r.InsideJokes, 1), " / "))
 	}
+	if len(r.Promises) > 0 {
+		parts = append(parts, "答应过: "+strings.Join(tail(r.Promises, 1), " / "))
+	}
+	if t := strings.TrimSpace(r.LastTopic); t != "" {
+		parts = append(parts, "上次说到: "+clipRunes(t, 24))
+	}
 	if r.Tension >= 0.45 {
 		parts = append(parts, "你们之间还有一点没消的别扭")
 	}

@@ -262,11 +262,11 @@ func TestJudgeTurnAgainstFakeServer(t *testing.T) {
 
 func TestBranchDoneOnlyWhileOpen(t *testing.T) {
 	p := &persona.Persona{Name: "t"}
-	closed := questions(p, false, "", Branch{})
+	closed := questions(p, false, "", Branch{}, WindowView{})
 	if _, ok := closed["branch_done"]; ok {
 		t.Fatal("no open branch, no branch_done")
 	}
-	open := questions(p, false, "", Branch{Kind: ActComputerUse, Goal: "打开记事本"})
+	open := questions(p, false, "", Branch{Kind: ActComputerUse, Goal: "打开记事本"}, WindowView{})
 	if _, ok := open["branch_done"]; !ok {
 		t.Fatal("open branch must ask branch_done")
 	}
@@ -308,7 +308,60 @@ func TestStayOnOpenBranch(t *testing.T) {
 	if finished || act != ActComputerUse {
 		t.Fatalf("no branch should follow act, got %s done=%v", act, finished)
 	}
+	leave := Parse("看一下桌面上有什么", map[string]jev.Answer{
+		"act":         {Choice: ActScreen},
+		"branch_done": {Noul: f(0.2)},
+	})
+	act, finished = leave.Stay(ActDivine, 0.55, 0)
+	if finished || act != ActScreen {
+		t.Fatalf("a different act must leave, got %s done=%v", act, finished)
+	}
+	if !leave.Yields(ActDivine) {
+		t.Fatal("explicit screen should yield an open divine branch")
+	}
+	if leave.Yields(ActScreen) {
+		t.Fatal("the same act does not yield")
+	}
 	if fresh.BranchDone(0) {
 		t.Fatal("unasked branch_done is not finished")
+	}
+}
+
+func TestWindowQuestionsStayClosed(t *testing.T) {
+	p := &persona.Persona{Name: "t"}
+	bare := questions(p, false, "", Branch{}, WindowView{})
+	if _, ok := bare["window"]; ok {
+		t.Fatal("no page module, no window question")
+	}
+	view := WindowView{
+		Modules: []WindowMod{{ID: "stage", Title: "stage", Open: true}},
+		Ops: map[string]string{
+			"none": "leave", "open": "show", "layout_split": "split",
+		},
+		Targets: map[string]string{"none": "leave", "j1": "image ready"},
+	}
+	qs := questions(p, false, "", Branch{}, view)
+	if _, ok := qs["window"]; !ok {
+		t.Fatal("registered module must ask window")
+	}
+	if _, ok := qs["win_op"]; !ok {
+		t.Fatal("registered module must ask win_op")
+	}
+	jd := Parse("打开", map[string]jev.Answer{
+		"window":     {Choice: "stage"},
+		"win_op":     {Choice: "layout_split"},
+		"win_target": {Choice: "nope"},
+	})
+	takeWindow(&jd, view)
+	if jd.Window != "stage" || jd.WinOp != "layout_split" {
+		t.Fatalf("window %+v", jd)
+	}
+	if jd.WinTarget != "" {
+		t.Fatalf("unknown target kept: %q", jd.WinTarget)
+	}
+	bad := Parse("打开", map[string]jev.Answer{"win_op": {Choice: "click"}})
+	takeWindow(&bad, view)
+	if bad.WinOp != "" {
+		t.Fatalf("unknown op kept: %q", bad.WinOp)
 	}
 }

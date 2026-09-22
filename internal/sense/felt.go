@@ -38,10 +38,12 @@ func (b *Bus) Felt(p *persona.Persona, ask Ask, attend string) string {
 			out += " " + feltSee(live, attend)
 		}
 		return out
+	case AskWindow:
+		return feltWindow(live, true)
 	case AskBody, AskExistence:
 		return b.feltSelf(p, live, ask.Kind) + b.feltAttend(live, attend)
 	default:
-		return feltPulse(live) + b.feltAttend(live, attend)
+		return feltPulse(live) + feltWindow(live, attend == "stage") + b.feltAttend(live, attend)
 	}
 }
 
@@ -91,8 +93,24 @@ func feltPulse(live Live) string {
 			or(live.PerceptKind, "media"), or(live.PerceptFile, "-"), clip(live.Percept, 240))
 		b.WriteString("This is what you actually saw or heard. Speak from it. Do not add details that are not written here. ")
 	}
+	if note := strings.TrimSpace(live.SelfNote); note != "" {
+		fmt.Fprintf(&b, "Last self step (mention only if they ask what you noticed or changed): %s ", clip(note, 240))
+	}
 	b.WriteString("You can feel this. Do not mention it unless asked.")
 	return b.String()
+}
+
+func feltWindow(live Live, asked bool) string {
+	if strings.TrimSpace(live.StageGlance) == "" {
+		if !asked {
+			return ""
+		}
+		return "They asked about the stage window. It is not open and the queue is empty. Say you do not have that page in front of you. Do not invent a picture or a layout. "
+	}
+	if !asked {
+		return "Stage window you can feel (mention only if they ask what it looks like): " + clip(live.StageGlance, 200) + " "
+	}
+	return "They asked what the stage window looks like. Speak only from this: " + live.StageGlance + " Do not add regions or pictures that are not written here. "
 }
 
 func (b *Bus) feltAttend(live Live, attend string) string {
@@ -169,6 +187,9 @@ func (b *Bus) feltSelf(p *persona.Persona, live Live, kind string) string {
 		s.WriteString("They asked who you are. Answer as yourself, honestly, short. ")
 		s.WriteString("You may say you can feel the code that makes you, without listing files. ")
 	}
+	if note := strings.TrimSpace(live.SelfNote); note != "" {
+		fmt.Fprintf(&s, "What you last did to yourself: %s ", clip(note, 320))
+	}
 	s.WriteString("Do not recite source, dump architecture, or sound like a manual. Stay in character. Voice-length.")
 	return s.String()
 }
@@ -201,6 +222,9 @@ func (b *Bus) feltLook(p *persona.Persona, live Live, ask Ask) string {
 		s.WriteString(" ")
 	}
 	fmt.Fprintf(&s, "Session is %s. ", or(live.Voice, "unknown"))
+	if note := strings.TrimSpace(live.SelfNote); note != "" {
+		fmt.Fprintf(&s, "What you last did to yourself: %s ", clip(note, 320))
+	}
 	s.WriteString("Talk about it as something you felt. Stay in character. Short. Their language. ")
 	s.WriteString("Do not dump the whole file or list every package.")
 	_ = p
@@ -210,9 +234,13 @@ func (b *Bus) feltLook(p *persona.Persona, live Live, ask Ask) string {
 // LogicCue is the short proprioception of how a turn actually runs.
 func LogicCue() string {
 	return "The logic you can feel: one turn hears them, one judgment picks mood and a single act, then your voice is steered. " +
-		"reflect notices your own state. look reads your source and does not edit it. " +
+		"reflect notices your own state. look reads your source. " +
+		"A self loop can read again, remember one line, or change one allowlisted file, then feel what changed. " +
+		"The running process stays the previous build until a separate restart. " +
 		"camera looks through the lens. screen reads computer-use window titles, not a screenshot. They are separate. " +
-		"codex edits this repo. computer_use is the desk loop that can touch windows. " +
+		"computer_use is the desk loop that can touch windows. " +
+		"divine casts six lines when they ask for a fortune; you feel the plate, you do not invent the coins. " +
+		"The stage window is a page module: pictures, clips, and notes land there, and you can feel what that page looks like. " +
 		"You do not call those yourself. Do not name the machinery unless they asked how you work."
 }
 

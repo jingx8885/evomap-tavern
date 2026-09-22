@@ -16,6 +16,7 @@ const (
 	AskCamera    = "camera"    // look through the camera
 	AskScreen    = "screen"    // look at the computer screen
 	AskLog       = "log"       // her own process log
+	AskWindow    = "window"    // her stage page
 )
 
 // Ask is a parsed self-inquiry.
@@ -32,6 +33,7 @@ var (
 	cameraRe = regexp.MustCompile(`(?i)(看见我|看到我|看得到我|摄像头|镜头|can you see me|see me|look at me)`)
 	screenRe = regexp.MustCompile(`(?i)(我的屏幕|屏幕上|屏幕里|看看屏幕|看屏幕|what('s| is) on (my )?screen|on my screen)`)
 	logRe    = regexp.MustCompile(`(?i)(你的日志|自己的日志|运行日志|看看日志|看日志|日志里|报错|出错|error log|your logs|the log)`)
+	windowRe = regexp.MustCompile(`(?i)(窗口长什么样|这个窗口|展示页|任务队列|画板上|stage window|what the window looks like)`)
 )
 
 // ParseAsk classifies a user utterance. File > code > body > existence.
@@ -52,6 +54,9 @@ func ParseAsk(text string) Ask {
 	}
 	if logRe.MatchString(t) {
 		return Ask{Kind: AskLog}
+	}
+	if windowRe.MatchString(t) {
+		return Ask{Kind: AskWindow}
 	}
 	if screenRe.MatchString(t) {
 		return Ask{Kind: AskScreen}

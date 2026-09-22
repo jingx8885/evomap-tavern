@@ -1,8 +1,10 @@
 package livevoice
 
 import (
+	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFitAppendStaysUnderGatewayCap(t *testing.T) {
@@ -135,5 +137,67 @@ func TestClipUplinkQueueKeepsTheLiveTail(t *testing.T) {
 	}
 	if q[0][0] != 14 || q[len(q)-1][0] != 19 {
 		t.Fatalf("kept %v..%v, want the newest 120ms", q[0][0], q[len(q)-1][0])
+	}
+}
+
+func TestSteerDuringSpeechIsDropped(t *testing.T) {
+	s := &Session{}
+	var sent []string
+	s.contextSend = func(channel, text string) error {
+		sent = append(sent, channel+":"+text)
+		return nil
+	}
+	s.handleEvent([]byte(`{"type":"session.output_transcript.delta","delta":"在的"}`))
+	if !s.Speaking() {
+		t.Fatal("assistant transcript should hold the line open")
+	}
+	if err := s.Steer("Stay in character. mode=continue"); !errors.Is(err, ErrHeld) {
+		t.Fatalf("steer while speaking: %v", err)
+	}
+	if err := s.Steer("You are still on reflect."); !errors.Is(err, ErrHeld) {
+		t.Fatalf("second steer: %v", err)
+	}
+	if err := s.Nudge("The coins are down. Say one short line."); !errors.Is(err, ErrHeld) {
+		t.Fatalf("nudge while speaking: %v", err)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("injected during the line: %v", sent)
+	}
+	s.handleEvent([]byte(`{"type":"turn.done","role":"user","transcript":"再说一句"}`))
+	if !s.Speaking() {
+		t.Fatal("user turn.done must not release her line")
+	}
+	s.handleEvent([]byte(`{"type":"turn.done","role":"assistant"}`))
+	s.speechUntil.Store(time.Now().Add(-time.Second).UnixNano())
+	s.deferMu.Lock()
+	if s.deferTimer != nil {
+		s.deferTimer.Stop()
+		s.deferTimer = nil
+	}
+	s.deferMu.Unlock()
+	s.flushDeferred()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d notes, want only the nudge: %v", len(sent), sent)
+	}
+	if sent[0] != "commentary:The coins are down. Say one short line." {
+		t.Fatalf("late note: %s", sent[0])
+	}
+}
+
+func TestSteerBeforeSpeechSendsNow(t *testing.T) {
+	s := &Session{}
+	var got string
+	s.contextSend = func(channel, text string) error {
+		got = channel + ":" + text
+		return nil
+	}
+	if err := s.Steer("Stay in character."); err != nil {
+		t.Fatal(err)
+	}
+	if got != "developer:Stay in character." {
+		t.Fatalf("got %q", got)
+	}
+	if s.Speaking() {
+		t.Fatal("a quiet steer must not mark her as speaking")
 	}
 }

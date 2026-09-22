@@ -4,15 +4,19 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>小春 · 桌面陪伴</title>
-  <link rel="stylesheet" href="/style.css?v=haru-eyes1" />
+  <link rel="stylesheet" href="/style.css?v=haru-queue" />
 </head>
 <body>
   <canvas id="stage"></canvas>
-  <aside id="hud">
+  <aside id="hud" class="panel">
     <header>
-      <strong>lov-evo</strong>
-      <span id="conn">connecting</span>
+      <button type="button" class="fold" aria-expanded="true" aria-controls="hud-body"><strong>lov-evo</strong></button>
+      <span class="hud-actions">
+        <button type="button" id="power-btn" class="on" title="关掉后断开语音，判断和规划都停">运行中</button>
+        <span id="conn">connecting</span>
+      </span>
     </header>
+    <div id="hud-body" class="panel-body">
     <dl>
       <div><dt>角色</dt><dd>小春</dd></div>
       <div><dt>关系</dt><dd id="relationship">—</dd></div>
@@ -25,35 +29,69 @@
     <div id="modes"></div>
     <canvas id="eye-canvas" hidden></canvas>
     <button type="button" id="unmute" class="hidden">开声音</button>
+    </div>
   </aside>
   <aside id="rail">
-    <section id="cam">
+    <section id="cam" class="panel">
       <header>
-        <strong>摄像头</strong>
+        <button type="button" class="fold" aria-expanded="true" aria-controls="cam-body"><strong>摄像头</strong></button>
         <span class="cam-actions">
-          <button type="button" id="eye-loop-btn" class="active" title="关掉后后台不再打 Jev 和视觉模型">观察开</button>
           <button type="button" id="eye-cam-btn">打开</button>
         </span>
       </header>
+      <div id="cam-body" class="panel-body">
       <div id="cam-stage">
         <video id="eye-cam" playsinline muted></video>
         <p id="cam-idle">未打开</p>
       </div>
+      </div>
     </section>
-    <section id="trace">
+    <section id="memory" class="panel">
       <header>
-        <strong>日志</strong>
+        <button type="button" class="fold" aria-expanded="true" aria-controls="memory-body"><strong>记忆</strong></button>
+        <span id="memory-meta">读取中</span>
+      </header>
+      <div id="memory-body" class="panel-body">
+      <p id="memory-summary"></p>
+      <ol id="memory-list"></ol>
+      <form id="memory-add">
+        <select id="memory-kind" aria-label="记忆类型">
+          <option value="open_loop">还记着</option>
+          <option value="promise">答应</option>
+          <option value="shared_event">经历</option>
+          <option value="inside_joke">梗</option>
+          <option value="topic">话题</option>
+        </select>
+        <input id="memory-text" maxlength="80" placeholder="替她记一条" autocomplete="off" />
+        <button type="submit">记下</button>
+      </form>
+      </div>
+    </section>
+    <section id="queue" class="panel">
+      <header>
+        <button type="button" class="fold" aria-expanded="true" aria-controls="queue-body"><strong>任务队列</strong></button>
+        <span id="queue-meta">读取中</span>
+      </header>
+      <div id="queue-body" class="panel-body">
+        <ol id="queue-list"></ol>
+      </div>
+    </section>
+    <section id="trace" class="panel">
+      <header>
+        <button type="button" class="fold" aria-expanded="true" aria-controls="trace-body"><strong>日志</strong></button>
         <span id="trace-meta">等待判断</span>
       </header>
+      <div id="trace-body" class="panel-body">
       <ol id="trace-list">
         <li id="trace-empty">连上之后，判断、steering、分支会记在这里。</li>
       </ol>
       <p id="status">loading Cubism runtime…</p>
+      </div>
     </section>
   </aside>
   <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
-  <script src="/app.js?v=haru-eyes1"></script>
+  <script src="/app.js?v=haru-queue"></script>
 </body>
 </html>

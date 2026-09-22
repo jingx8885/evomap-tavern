@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -94,7 +95,38 @@ type Session struct {
 	answerAudio   string
 
 	Verbose bool
+
+	// Downlink speech. lineOpen stays set until the assistant turn
+	// closes; speechUntil covers the playback tail after the last packet.
+	lineOpen    atomic.Bool
+	speechUntil atomic.Int64
+
+	deferMu    sync.Mutex
+	deferred   []deferredNote
+	deferTimer *time.Timer
+	noteMu     sync.Mutex
+	noteFn     func(string)
+	// contextSend overrides AppendContext in tests.
+	contextSend func(channel, text string) error
 }
+
+// deferredNote is one context append waiting until she is quiet.
+type deferredNote struct {
+	channel string
+	text    string
+}
+
+// ErrHeld means the note was not injected into the live line.
+// Steer drops it. Nudge keeps commentary and sends it when the line ends.
+var ErrHeld = errors.New("not injected into the live line")
+
+// speechTail is how long after the latest downlink voice the line
+// still counts as in progress. Packets lead the speaker by a little.
+const speechTail = 900 * time.Millisecond
+
+// speechStuck is how long a missing assistant turn.done may keep the
+// line open after packets stop, so a dropped event cannot wedge steering.
+const speechStuck = 5 * time.Second
 
 // Connect establishes WebRTC + WS and returns a live session.
 // instructions becomes the session-level persona prompt.
@@ -527,6 +559,7 @@ func (s *Session) handleEvent(data []byte) {
 		s.pcmMu.Unlock()
 		if audio.ChunkHasVoice(pcm) {
 			s.duckMic()
+			s.markSpeaking()
 		}
 		playbackPCM := s.playbackGate.Filter(pcm)
 		if s.player != nil {
@@ -561,10 +594,15 @@ func (s *Session) handleEvent(data []byte) {
 		if speaker != "user" {
 			applyTranscript(&s.interim, text)
 			s.duckMic()
+			s.markSpeaking()
 		}
 		s.emit(Event{Kind: EventTranscript, Speaker: speaker, Text: dst.String()})
 	case etype == "turn.done" || etype == "turn.completed" || etype == "response.done":
-		s.finishTurn(eventRole(ev), transcriptText(ev))
+		role := eventRole(ev)
+		if role == "assistant" || etype == "response.done" {
+			s.markLineClosed()
+		}
+		s.finishTurn(role, transcriptText(ev))
 	case etype == "session.usage.updated":
 		s.markStarted()
 		usage, _ := ev["usage"].(map[string]any)
@@ -790,8 +828,12 @@ func (s *Session) AppendContext(channel, text string) error {
 // Nudge injects a proactive cue through the commentary channel:
 // the model sees it and may respond aloud, incorporating it.
 // Use it for planner-driven conversation moves.
+// A line already in progress is not cut; the cue waits until it ends.
 func (s *Session) Nudge(cue string) error {
-	return s.AppendContext("commentary", cue)
+	if s.hold("commentary", cue) {
+		return ErrHeld
+	}
+	return s.sendContext("commentary", cue)
 }
 
 // Respond asks the model to produce a response turn.
@@ -799,12 +841,166 @@ func (s *Session) Respond() error {
 	return s.sendJSON(map[string]any{"type": "response.create"})
 }
 
-// Steer pushes behavioral guidance mid-conversation through the
-// developer context channel. Upstream rejects session.update for
-// instructions after initialization, so we inject the steering note
-// as silent developer context instead.
+// Steer pushes behavioral guidance through the developer channel.
+// Upstream rejects session.update for instructions after initialization,
+// so the note is silent developer context. It has to land while she is
+// quiet, before this reply starts. A line already open drops the note:
+// appending developer context after the line still opens another turn.
 func (s *Session) Steer(guidance string) error {
-	return s.AppendContext("developer", guidance)
+	if strings.TrimSpace(guidance) == "" {
+		return nil
+	}
+	if s.Speaking() {
+		return ErrHeld
+	}
+	return s.sendContext("developer", guidance)
+}
+
+// Speaking reports whether downlink speech is still in progress.
+func (s *Session) Speaking() bool {
+	now := time.Now().UnixNano()
+	until := s.speechUntil.Load()
+	if now < until {
+		return true
+	}
+	if s.lineOpen.Load() && now < until+int64(speechStuck) {
+		return true
+	}
+	return false
+}
+
+// SetNote receives lines the session wants on the agent log,
+// such as a held steer that is delivered after the line.
+func (s *Session) SetNote(fn func(string)) {
+	s.noteMu.Lock()
+	s.noteFn = fn
+	s.noteMu.Unlock()
+}
+
+func (s *Session) note(msg string) {
+	s.noteMu.Lock()
+	fn := s.noteFn
+	s.noteMu.Unlock()
+	if fn != nil {
+		fn(msg)
+	}
+}
+
+func (s *Session) markSpeaking() {
+	s.lineOpen.Store(true)
+	s.speechUntil.Store(time.Now().Add(speechTail).UnixNano())
+	s.rescheduleDeferred()
+}
+
+func (s *Session) markLineClosed() {
+	if !s.lineOpen.Swap(false) {
+		return
+	}
+	s.speechUntil.Store(time.Now().Add(speechTail).UnixNano())
+	s.rescheduleDeferred()
+}
+
+func (s *Session) rescheduleDeferred() {
+	s.deferMu.Lock()
+	if len(s.deferred) > 0 {
+		s.armDeferLocked()
+	}
+	s.deferMu.Unlock()
+}
+
+// hold queues text when a line is in progress or an older note is
+// already waiting. The caller must not also send it.
+func (s *Session) hold(channel, text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return true
+	}
+	s.deferMu.Lock()
+	defer s.deferMu.Unlock()
+	if !s.Speaking() && len(s.deferred) == 0 {
+		return false
+	}
+	s.enqueueLocked(channel, text)
+	return true
+}
+
+func (s *Session) enqueueLocked(channel, text string) {
+	for i := range s.deferred {
+		if s.deferred[i].channel != channel {
+			continue
+		}
+		if channel == "commentary" {
+			s.deferred[i].text = text
+		} else {
+			s.deferred[i].text = s.deferred[i].text + "\n" + text
+		}
+		s.armDeferLocked()
+		return
+	}
+	s.deferred = append(s.deferred, deferredNote{channel: channel, text: text})
+	s.armDeferLocked()
+}
+
+func (s *Session) armDeferLocked() {
+	delay := 40 * time.Millisecond
+	if until := s.speechUntil.Load(); until > time.Now().UnixNano() {
+		wait := time.Until(time.Unix(0, until)) + 40*time.Millisecond
+		if wait > delay {
+			delay = wait
+		}
+	}
+	if s.lineOpen.Load() && delay < 200*time.Millisecond {
+		delay = 200 * time.Millisecond
+	}
+	if s.deferTimer != nil {
+		s.deferTimer.Stop()
+	}
+	s.deferTimer = time.AfterFunc(delay, s.flushDeferred)
+}
+
+func (s *Session) flushDeferred() {
+	if s.Speaking() {
+		s.deferMu.Lock()
+		if len(s.deferred) > 0 {
+			s.armDeferLocked()
+		}
+		s.deferMu.Unlock()
+		return
+	}
+	s.deferMu.Lock()
+	batch := s.deferred
+	s.deferred = nil
+	if s.deferTimer != nil {
+		s.deferTimer.Stop()
+		s.deferTimer = nil
+	}
+	s.deferMu.Unlock()
+	for _, item := range batch {
+		if item.channel == "developer" {
+			s.note("[steer] dropped")
+			continue
+		}
+		text := item.text
+		if err := s.sendContext(item.channel, text); err != nil {
+			s.note(fmt.Sprintf("[%s] after line failed: %v", noteTag(item.channel), err))
+			continue
+		}
+		s.note(fmt.Sprintf("[%s] after line", noteTag(item.channel)))
+	}
+}
+
+func noteTag(channel string) string {
+	if channel == "commentary" {
+		return "nudge"
+	}
+	return "steer"
+}
+
+func (s *Session) sendContext(channel, text string) error {
+	if s.contextSend != nil {
+		return s.contextSend(channel, text)
+	}
+	return s.AppendContext(channel, text)
 }
 
 func (s *Session) sendJSON(v any) error {
@@ -865,6 +1061,13 @@ func (s *Session) emit(ev Event) {
 // Close ends the session.
 func (s *Session) Close() {
 	s.closeOnce.Do(func() {
+		s.deferMu.Lock()
+		if s.deferTimer != nil {
+			s.deferTimer.Stop()
+			s.deferTimer = nil
+		}
+		s.deferred = nil
+		s.deferMu.Unlock()
 		s.cancel()
 		if s.ws != nil {
 			_ = s.ws.WriteMessage(websocket.CloseMessage,

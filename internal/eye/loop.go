@@ -5,77 +5,37 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
-// Eyes is the running pair of camera + screen samplers plus a Jev/VLM loop.
+// Eyes holds the latest camera frame and the last captions.
+// It does not sample on a clock. Glance is the only look.
 type Eyes struct {
 	opt Options
 
-	mu      sync.Mutex
-	latest  map[string]Frame
-	seen    map[string]Glimpse
-	thumbs  map[string][]byte
-	lastV   map[string]time.Time
-	dirty   map[string]bool
-	scrSig  string
-	enabled atomic.Bool // background Jev/VLM; Glance still runs when this is off
+	mu     sync.Mutex
+	latest map[string]Frame
+	seen   map[string]Glimpse
 }
 
-// New builds a stopped pair. Start launches the goroutines.
+// New builds a pair that waits for Glance.
 func New(opt Options) *Eyes {
-	if opt.Interval <= 0 {
-		opt.Interval = 10 * time.Second
-	}
-	if opt.Cooldown <= 0 {
-		opt.Cooldown = 10 * time.Second
-	}
-	e := &Eyes{
+	return &Eyes{
 		opt:    opt,
 		latest: map[string]Frame{},
 		seen:   map[string]Glimpse{},
-		thumbs: map[string][]byte{},
-		lastV:  map[string]time.Time{},
-		dirty:  map[string]bool{},
-	}
-	e.enabled.Store(true)
-	return e
-}
-
-// Enabled reports whether the background sampler is calling models.
-func (e *Eyes) Enabled() bool {
-	return e != nil && e.enabled.Load()
-}
-
-// SetEnabled pauses or resumes background captions. A paused pair still
-// answers Glance, so /camera and /screen stay one-shot.
-func (e *Eyes) SetEnabled(on bool) {
-	if e == nil {
-		return
-	}
-	if e.enabled.Swap(on) == on {
-		return
-	}
-	if on {
-		e.log("eyes on")
-	} else {
-		e.log("eyes off")
 	}
 }
 
-// Start launches camera inbox consumption, native screen grab, and the gate loop.
+// Start builds the pair. There is no background sampler.
 func Start(ctx context.Context, opt Options) *Eyes {
+	_ = ctx
 	e := New(opt)
-	if opt.Screen {
-		go e.sampleScreen(ctx)
-	}
-	go e.loop(ctx)
-	e.log("eyes up camera=%v screen=computer-use every=%s", opt.Camera, opt.Interval)
+	e.log("eyes up camera=%v screen=computer-use on demand", opt.Camera)
 	return e
 }
 
-// Push accepts a JPEG from the Live2D viewer (camera or picked window).
+// Push accepts a JPEG from the Live2D viewer.
 func (e *Eyes) Push(source, dataURL string) error {
 	if e == nil {
 		return fmt.Errorf("eyes down")
@@ -98,7 +58,6 @@ func (e *Eyes) pushJPEG(source string, raw []byte) error {
 	}
 	e.mu.Lock()
 	e.latest[source] = f
-	e.dirty[source] = true
 	e.mu.Unlock()
 	return nil
 }
@@ -116,69 +75,87 @@ func (e *Eyes) Snapshot() Sight {
 	}
 }
 
-// Glance forces one source and leaves the other alone.
-// Camera captions the latest JPEG. Screen takes a computer-use window snapshot.
+// Glance looks at one source once and leaves the other alone.
+// Camera captions one JPEG. Screen takes one computer-use window snapshot.
 func (e *Eyes) Glance(ctx context.Context, source string) Glimpse {
 	if e == nil {
 		return Glimpse{}
 	}
 	switch source {
 	case SourceCamera:
-		e.mu.Lock()
-		cam := e.latest[SourceCamera]
-		e.mu.Unlock()
-		if len(cam.JPEG) > 0 {
-			e.describe(ctx, cam, true)
-		}
-		s := e.Snapshot()
-		e.emit(s)
-		return s.Camera
+		return e.glanceCamera(ctx)
 	case SourceScreen:
-		e.refreshScreen(ctx, true)
+		e.refreshScreen(ctx)
 		return e.Snapshot().Screen
 	default:
 		return Glimpse{}
 	}
 }
 
-func (e *Eyes) sampleScreen(ctx context.Context) {
-	if e.Enabled() {
-		e.refreshScreen(ctx, false)
+func (e *Eyes) glanceCamera(ctx context.Context) Glimpse {
+	if e.opt.Grab != nil {
+		mark := time.Now()
+		if e.opt.Grab(ctx) {
+			e.waitCamera(ctx, mark, 1200*time.Millisecond)
+		}
 	}
-	tick := time.NewTicker(e.opt.Interval)
-	defer tick.Stop()
+	e.mu.Lock()
+	cam := e.latest[SourceCamera]
+	last := e.seen[SourceCamera].Caption
+	e.mu.Unlock()
+	if len(cam.JPEG) == 0 {
+		e.log("camera: no frame")
+		return Glimpse{Source: SourceCamera}
+	}
+	gcall := e.gate(ctx, SourceCamera, 1, last, len(cam.JPEG), cam.Width, cam.Height)
+	if gcall.Private {
+		e.mu.Lock()
+		g := e.seen[SourceCamera]
+		g.Source = SourceCamera
+		g.Private = true
+		g.Caption = "看起来是私人画面，不细看。"
+		g.Noted = false
+		g.Ready = true
+		g.At = time.Now()
+		e.seen[SourceCamera] = g
+		e.mu.Unlock()
+		e.log("camera private, skipped vlm")
+		e.emit(e.Snapshot())
+		return e.Snapshot().Camera
+	}
+	e.describe(ctx, cam, true)
+	e.emit(e.Snapshot())
+	return e.Snapshot().Camera
+}
+
+func (e *Eyes) waitCamera(ctx context.Context, after time.Time, d time.Duration) {
+	deadline := time.Now().Add(d)
 	for {
+		e.mu.Lock()
+		at := e.latest[SourceCamera].At
+		e.mu.Unlock()
+		if !at.IsZero() && !at.Before(after) {
+			return
+		}
+		if ctx.Err() != nil || !time.Now().Before(deadline) {
+			return
+		}
+		timer := time.NewTimer(40 * time.Millisecond)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-tick.C:
-			if !e.Enabled() {
-				continue
-			}
-			e.refreshScreen(ctx, false)
+		case <-timer.C:
 		}
 	}
 }
 
-func (e *Eyes) refreshScreen(ctx context.Context, force bool) {
+func (e *Eyes) refreshScreen(ctx context.Context) {
 	view, err := e.observe(ctx)
 	if err != nil {
 		e.log("screen: %v", err)
 		return
 	}
-	e.mu.Lock()
-	same := !force && view.Signature != "" && view.Signature == e.scrSig && e.seen[SourceScreen].Caption != ""
-	if !force && !same {
-		lastAt := e.lastV[SourceScreen]
-		if e.seen[SourceScreen].Caption != "" && !lastAt.IsZero() && time.Since(lastAt) < e.opt.Cooldown && view.Signature == e.scrSig {
-			same = true
-		}
-	}
-	if same {
-		e.mu.Unlock()
-		return
-	}
-	e.scrSig = view.Signature
 	g := Glimpse{
 		Source:  SourceScreen,
 		Caption: clipCaption(view.Caption, 180),
@@ -189,8 +166,8 @@ func (e *Eyes) refreshScreen(ctx context.Context, force bool) {
 	if g.Caption == "" {
 		g.Caption = "桌面窗口快照还是空的"
 	}
+	e.mu.Lock()
 	e.seen[SourceScreen] = g
-	e.lastV[SourceScreen] = time.Now()
 	e.mu.Unlock()
 	e.log("screen: %s", g.Caption)
 	e.emit(e.Snapshot())
@@ -201,96 +178,6 @@ func (e *Eyes) observe(ctx context.Context) (ScreenView, error) {
 		return e.opt.Observe(ctx)
 	}
 	return ScreenView{}, fmt.Errorf("no computer-use observer")
-}
-
-func (e *Eyes) loop(ctx context.Context) {
-	tick := time.NewTicker(e.opt.Interval)
-	defer tick.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tick.C:
-			e.tick(ctx)
-		}
-	}
-}
-
-func (e *Eyes) tick(ctx context.Context) {
-	if !e.Enabled() {
-		return
-	}
-	e.mu.Lock()
-	var jobs []Frame
-	for src, f := range e.latest {
-		if !e.dirty[src] || len(f.JPEG) == 0 {
-			continue
-		}
-		jobs = append(jobs, f)
-		e.dirty[src] = false
-	}
-	e.mu.Unlock()
-	if len(jobs) == 0 {
-		return
-	}
-	var wg sync.WaitGroup
-	for _, f := range jobs {
-		f := f
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			e.consider(ctx, f)
-		}()
-	}
-	wg.Wait()
-	e.emit(e.Snapshot())
-}
-
-func (e *Eyes) consider(ctx context.Context, f Frame) {
-	e.mu.Lock()
-	prev := e.thumbs[f.Source]
-	lastCap := e.seen[f.Source].Caption
-	lastAt := e.lastV[f.Source]
-	e.mu.Unlock()
-
-	delta := ThumbDelta(prev, f.Thumb)
-	e.mu.Lock()
-	e.thumbs[f.Source] = f.Thumb
-	g := e.seen[f.Source]
-	g.Source = f.Source
-	g.Delta = delta
-	g.Width = f.Width
-	g.Height = f.Height
-	g.Bytes = len(f.JPEG)
-	g.Ready = true
-	g.At = f.At
-	e.seen[f.Source] = g
-	e.mu.Unlock()
-
-	if delta < hashFallback && lastCap != "" {
-		return
-	}
-	if !lastAt.IsZero() && time.Since(lastAt) < e.opt.Cooldown && lastCap != "" {
-		return
-	}
-
-	gcall := e.gate(ctx, f.Source, delta, lastCap, len(f.JPEG), f.Width, f.Height)
-	if gcall.Private {
-		e.mu.Lock()
-		g := e.seen[f.Source]
-		g.Private = true
-		g.Caption = "看起来是私人画面，不细看。"
-		g.Noted = false
-		e.seen[f.Source] = g
-		e.lastV[f.Source] = time.Now()
-		e.mu.Unlock()
-		e.log("%s private, skipped vlm", f.Source)
-		return
-	}
-	if !gcall.Noteworthy && lastCap != "" {
-		return
-	}
-	e.describe(ctx, f, gcall.Mention)
 }
 
 func (e *Eyes) describe(ctx context.Context, f Frame, mention bool) {
@@ -316,7 +203,6 @@ func (e *Eyes) describe(ctx context.Context, f Frame, mention bool) {
 	g.Private = false
 	g.Noted = mention
 	e.seen[f.Source] = g
-	e.lastV[f.Source] = time.Now()
 	e.mu.Unlock()
 	e.log("%s: %s", f.Source, text)
 }

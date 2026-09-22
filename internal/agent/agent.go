@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,11 +23,13 @@ import (
 	"github.com/jingx8885/lov-evo/internal/livevoice"
 	"github.com/jingx8885/lov-evo/internal/llm"
 	"github.com/jingx8885/lov-evo/internal/memory"
+	"github.com/jingx8885/lov-evo/internal/oracle"
 	"github.com/jingx8885/lov-evo/internal/persona"
 	"github.com/jingx8885/lov-evo/internal/planner"
 	"github.com/jingx8885/lov-evo/internal/sense"
 	"github.com/jingx8885/lov-evo/internal/steering"
 	"github.com/jingx8885/lov-evo/internal/studio"
+	"github.com/jingx8885/lov-evo/internal/window"
 )
 
 // Options configures a run.
@@ -47,11 +50,14 @@ type Options struct {
 	SenseRoot    string
 	Vision       string
 	VisionModel  string
-	VisionEvery  time.Duration
 	avatarHub    *avatar.Hub
 	sense        *sense.Bus
 	eyes         *eye.Eyes
 	rel          *memory.RelationshipStore
+	power        *power
+	deskWin      *window.Registry
+	stageQ       *window.Stage
+	voice        *voiceHold
 }
 
 // Run starts a live voice session and processes turns until ctx is done.
@@ -85,6 +91,25 @@ func Run(ctx context.Context, opt Options) error {
 			l.Voice = "connecting"
 		})
 	}
+
+	opt.voice = &voiceHold{}
+	media := mediaDir(opt)
+	st := window.NewStage(window.StageOptions{
+		Runner:  stageRunner(opt.BaseURL, opt.APIKey, media, llmClient),
+		Changed: func() { rememberStage(opt) },
+	})
+	reg := window.New(window.Options{
+		MediaDir: media,
+		Open:     window.OpenBrowser,
+		LogFn:    func(s string) { opt.log("%s", s) },
+	})
+	reg.Register(st)
+	opt.stageQ = st
+	opt.deskWin = reg
+	if _, err := reg.Listen(ctx, "127.0.0.1:0"); err != nil {
+		opt.log("stage window disabled: %v", err)
+	}
+	defer reg.Close()
 
 	if addr := strings.TrimSpace(opt.Live2DAddr); addr != "" && addr != "off" {
 		hub, _, err := avatar.Listen(ctx, avatar.ListenOptions{
@@ -121,11 +146,17 @@ func Run(ctx context.Context, opt Options) error {
 		vis := llm.NewClient(opt.BaseURL, opt.APIKey, visModel)
 		host := desk.DefaultHost{}
 		opt.eyes = eye.Start(ctx, eye.Options{
-			Camera:   cam,
-			Screen:   scr,
-			Interval: opt.VisionEvery,
-			Jev:      jevClient,
-			LLM:      vis,
+			Camera: cam,
+			Screen: scr,
+			Grab: func(context.Context) bool {
+				if opt.avatarHub == nil {
+					return false
+				}
+				opt.avatarHub.RequestCapture()
+				return true
+			},
+			Jev: jevClient,
+			LLM: vis,
 			Observe: func(ctx context.Context) (eye.ScreenView, error) {
 				g, err := desk.Look(ctx, jevClient, host, "")
 				if err != nil {
@@ -165,15 +196,50 @@ func Run(ctx context.Context, opt Options) error {
 					opt.log("[eye] push %s: %v", source, err)
 				}
 			})
-			opt.avatarHub.SetEyes(eyes.Enabled, eyes.SetEnabled)
+		}
+	}
+
+	opt.power = newPower(ctx, func(s string) { opt.log("%s", s) })
+	if opt.avatarHub != nil {
+		pw := opt.power
+		opt.avatarHub.SetSystem(pw.On, pw.Set)
+		st := opt.stageQ
+		reg := opt.deskWin
+		opt.avatarHub.SetQueue(func() any {
+			if st == nil {
+				return window.QueueView{Jobs: []window.Job{}}
+			}
+			media := ""
+			open := false
+			if reg != nil {
+				media = reg.URL()
+				open = reg.Open("stage")
+			}
+			return st.QueueView(open, media)
+		})
+		if opt.rel != nil {
+			rel := opt.rel
+			opt.avatarHub.SetMemory(rel.View, func(op memory.MemoryOp) (memory.MemoryView, error) {
+				view, err := rel.Apply(op)
+				if err != nil {
+					opt.log("[memory] %s: %v", op.Op, err)
+					return view, err
+				}
+				label := strings.TrimSpace(op.Text)
+				if label == "" {
+					label = op.ID
+				}
+				opt.log("[memory] %s %s", op.Op, clip(label, 40))
+				return view, nil
+			})
 		}
 	}
 
 	cmds := make(chan string, 16)
 	go readStdin(ctx, cmds)
 	opt.log("commands: /say <text> (speak) /steer <text> (reinstruct) " +
-		"/goal <text> (plan) /look <file> (her source) /camera /screen /eyes on|off /sense /desk <goal> " +
-		"/codex <goal> (luna) /status /quit")
+		"/goal <text> (plan) /look <file> (her source) /camera /screen /sense /desk <goal> " +
+		"/stage (page) /codex <goal> (luna) /divine <question> /off /on /status /quit")
 
 	first := true
 	var lastErr error
@@ -181,18 +247,28 @@ func Run(ctx context.Context, opt Options) error {
 		if err := ctx.Err(); err != nil {
 			return opt.saveLog(mem, pl, lastErr)
 		}
+		for opt.power != nil && !opt.power.On() {
+			select {
+			case <-ctx.Done():
+				return opt.saveLog(mem, pl, ctx.Err())
+			case <-opt.power.wake:
+			case line := <-cmds:
+				if opt.handlePaused(line) {
+					return opt.saveLog(mem, pl, lastErr)
+				}
+			}
+		}
 		sess, err := livevoice.Connect(ctx, opt.BaseURL, opt.APIKey,
 			p.BaseInstructions(), p.Voice)
 		if err != nil {
 			lastErr = err
 			opt.log("voice connect failed: %v; retry in 2s", err)
-			select {
-			case <-ctx.Done():
+			if !opt.afterVoiceGap(ctx) {
 				return opt.saveLog(mem, pl, err)
-			case <-time.After(2 * time.Second):
 			}
 			continue
 		}
+		opt.power.Arm(sess.Close)
 		sess.Verbose = opt.Verbose
 		if opt.avatarHub != nil {
 			sess.OnPCM(func(pcm []byte) {
@@ -206,13 +282,15 @@ func Run(ctx context.Context, opt Options) error {
 		err = sess.WaitStarted(wctx)
 		cancel()
 		if err != nil {
+			opt.power.Disarm()
 			sess.Close()
 			lastErr = err
+			if !opt.power.On() {
+				continue
+			}
 			opt.log("session did not start: %v; retry in 2s", err)
-			select {
-			case <-ctx.Done():
+			if !opt.afterVoiceGap(ctx) {
 				return opt.saveLog(mem, pl, err)
-			case <-time.After(2 * time.Second):
 			}
 			continue
 		}
@@ -238,6 +316,7 @@ func Run(ctx context.Context, opt Options) error {
 
 		res := pumpSession(ctx, opt, p, jevClient, llmClient, mem, pl, sess, cmds)
 		sess.Close()
+		opt.power.Disarm()
 		opt.sense.Set(func(l *sense.Live) { l.Voice = "down" })
 		opt.sense.Emit(sense.Event{Kind: sense.KindVoice, Summary: "down"})
 		switch res.kind {
@@ -245,11 +324,12 @@ func Run(ctx context.Context, opt Options) error {
 			return opt.saveLog(mem, pl, res.err)
 		default:
 			lastErr = res.err
+			if !opt.power.On() {
+				continue
+			}
 			opt.log("voice session dropped: %v; reconnecting in 2s", res.err)
-			select {
-			case <-ctx.Done():
+			if !opt.afterVoiceGap(ctx) {
 				return opt.saveLog(mem, pl, res.err)
-			case <-time.After(2 * time.Second):
 			}
 		}
 	}
@@ -271,10 +351,18 @@ type pumpResult struct {
 func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
 	jevClient *jev.Client, llmClient *llm.Client, mem *memory.Memory, pl *planner.Planner,
 	sess *livevoice.Session, cmds <-chan string) pumpResult {
+	if opt.voice != nil {
+		opt.voice.bind(sess)
+		defer opt.voice.bind(nil)
+	}
+	sess.SetNote(func(m string) { opt.log("%s", m) })
 	var lastTurnKey string
 	var lastTurnAt time.Time
 	gate := newJevGate()
 	slot := &capabilitySlot{}
+	if opt.power != nil {
+		opt.power.SetStop(slot.close)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -510,6 +598,7 @@ type capabilitySlot struct {
 	kind      string
 	goal      string
 	note      string
+	hold      string
 	runCancel context.CancelFunc
 	gen       int
 }
@@ -541,6 +630,7 @@ func (s *capabilitySlot) open(kind, goal string) {
 	s.kind = kind
 	s.goal = strings.TrimSpace(goal)
 	s.note = ""
+	s.hold = ""
 }
 
 func (s *capabilitySlot) follow(text string) {
@@ -572,6 +662,24 @@ func (s *capabilitySlot) setNote(note string) {
 	s.mu.Unlock()
 }
 
+func (s *capabilitySlot) setHold(v string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.hold = v
+	s.mu.Unlock()
+}
+
+func (s *capabilitySlot) holdText() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.hold
+}
+
 func (s *capabilitySlot) close() {
 	if s == nil {
 		return
@@ -583,6 +691,30 @@ func (s *capabilitySlot) close() {
 	s.kind = ""
 	s.goal = ""
 	s.note = ""
+	s.hold = ""
+	s.computer = false
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *capabilitySlot) closeIf(kind string) {
+	if s == nil || kind == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.kind != kind {
+		s.mu.Unlock()
+		return
+	}
+	cancel := s.runCancel
+	s.runCancel = nil
+	s.gen++
+	s.kind = ""
+	s.goal = ""
+	s.note = ""
+	s.hold = ""
 	s.computer = false
 	s.mu.Unlock()
 	if cancel != nil {
@@ -642,9 +774,18 @@ func (s *capabilitySlot) endComputer(gen int) {
 // processTurn runs the one turn Jev, steering, then the capability that Jev picked.
 // Partial transcripts do not call Jev. turn.done does, at most once per jevMinInterval.
 // Tool side effects run only after a successful final judgment.
+// Steering and branch notes share one voice inject. If she is already
+// speaking, that inject waits until the line ends; if she has not
+// started, it lands first and the reply uses it. Neither cuts the other.
 func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 	jc *jev.Client, lc *llm.Client, mem *memory.Memory, pl *planner.Planner,
 	sess *livevoice.Session, gate *jevGate, slot *capabilitySlot, userText string, final bool) {
+	if opt.power != nil {
+		ctx = opt.power.Ctx()
+		if !opt.power.On() || ctx.Err() != nil {
+			return
+		}
+	}
 	// Greeting / model self-talk has no user text. Judging those as
 	// "low engagement" steers re_engage and commentary-nudges, which
 	// makes the duplex model say the same line again.
@@ -660,6 +801,9 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 			obs.Camera = live.Camera
 			obs.Screen = live.Screen
 			obs.Log = opt.sense.LogTail(6)
+		}
+		if opt.deskWin != nil {
+			obs.Window = windowView(opt.deskWin.Spec())
 		}
 		jd, err := judge.JudgeTurn(ctx, jc, p, mem, userText, pl.Current(), obs, slot.snapshot())
 		if err != nil {
@@ -677,8 +821,9 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 			if !final {
 				tag = " early"
 			}
-			opt.log("[judge]%s emotion=%s intent=%s self=%s jev_mode=%s attend=%s act=%s valence=%.2f arousal=%.2f engage=%.2f safety=%.2f fit=%.2f need_llm=%.2f conf=%.2f",
+			opt.log("[judge]%s emotion=%s intent=%s self=%s jev_mode=%s attend=%s act=%s window=%s op=%s valence=%.2f arousal=%.2f engage=%.2f safety=%.2f fit=%.2f need_llm=%.2f conf=%.2f",
 				tag, jd.Emotion, orDash(jd.Intent), orDash(jd.SelfEmotion), orDash(jd.Mode), orDash(jd.Attend), orDash(jd.Act),
+				orDash(jd.Window), orDash(jd.WinOp),
 				jd.Valence, jd.Arousal, jd.Engagement, jd.SafetyP, jd.PersonaFitP, jd.NeedLLMP, jd.Confidence)
 
 			mode := judge.DecideMode(jd, affect, p.Judge.SafetyThresh, pl.Current())
@@ -717,6 +862,17 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 			if ask.Kind != "" {
 				opt.sense.Set(func(l *sense.Live) { l.LastAsk = ask.Kind })
 			}
+			if final && opt.deskWin != nil && mode != "safety" && jd.WinOp != "" && jd.WinOp != window.OpNone {
+				if jd.WinOp == window.OpDecorate || jd.WinOp == window.OpAddControl {
+					opt.log("[window] %s %s", orDash(jd.Window), jd.WinOp)
+					go dressStage(ctx, opt, lc, sess, userText, jd.WinOp)
+				} else if _, err := opt.deskWin.Apply(jd.Window, jd.WinOp, jd.WinTarget); err != nil {
+					opt.log("[window] %s %s: %v", orDash(jd.Window), jd.WinOp, err)
+				} else {
+					opt.log("[window] %s %s", orDash(jd.Window), jd.WinOp)
+					rememberStage(opt)
+				}
+			}
 			felt := ""
 			if opt.sense != nil {
 				felt = opt.sense.Felt(p, ask, jd.Attend)
@@ -726,16 +882,22 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 			}
 			// The gateway rejects one append over 500 tokens. The scene
 			// note and the observation (log, camera, screen) go separately
-			// so neither one crowds the other out.
-			if err := sess.Steer(livevoice.FitHead(note)); err != nil {
+			// so neither one crowds the other out. A line already playing
+			// drops both: a late developer append opens another turn.
+			if err := sess.Steer(livevoice.FitHead(note)); errors.Is(err, livevoice.ErrHeld) {
+				opt.log("[steer] skipped mode=%s", mode)
+				opt.sense.Emit(sense.Event{Kind: sense.KindSteer, Summary: mode})
+			} else if err != nil {
 				opt.log("[steer] failed: %v", err)
 			} else {
 				opt.log("[steer] mode=%s", mode)
 				opt.sense.Emit(sense.Event{Kind: sense.KindSteer, Summary: mode})
 			}
 			if felt != "" {
-				if err := sess.Steer(livevoice.FitTail(felt)); err != nil {
+				if err := sess.Steer(livevoice.FitTail(felt)); err != nil && !errors.Is(err, livevoice.ErrHeld) {
 					opt.log("[steer] observe failed: %v", err)
+				} else if errors.Is(err, livevoice.ErrHeld) {
+					opt.log("[steer] observe skipped")
 				}
 			}
 			gate.remember(jd)
@@ -745,7 +907,7 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 		opt.log("[judge] skip (within %s)", gate.minInterval)
 		// A log question still has to land. Cooling must not drop the
 		// journal, or she answers as if she cannot see her own log.
-		if ask := sense.ParseAsk(userText); opt.sense != nil && (ask.Kind == sense.AskLog || ask.Kind == sense.AskCamera || ask.Kind == sense.AskScreen) {
+		if ask := sense.ParseAsk(userText); opt.sense != nil && (ask.Kind == sense.AskLog || ask.Kind == sense.AskCamera || ask.Kind == sense.AskScreen || ask.Kind == sense.AskWindow) {
 			attend := ""
 			switch ask.Kind {
 			case sense.AskCamera:
@@ -754,8 +916,10 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 				attend = "screen"
 			}
 			if felt := opt.sense.Felt(p, ask, attend); felt != "" {
-				if err := sess.Steer(livevoice.FitTail(felt)); err != nil {
+				if err := sess.Steer(livevoice.FitTail(felt)); err != nil && !errors.Is(err, livevoice.ErrHeld) {
 					opt.log("[steer] observe failed: %v", err)
+				} else if errors.Is(err, livevoice.ErrHeld) {
+					opt.log("[steer] observe held")
 				}
 			}
 		}
@@ -774,7 +938,9 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 		deadline := time.Now().Add(50 * time.Second)
 		for time.Now().Before(deadline) {
 			if note, ok := pl.ConsumeNudge(before); ok {
-				if err := sess.Nudge(note); err != nil {
+				if err := sess.Nudge(note); errors.Is(err, livevoice.ErrHeld) {
+					opt.log("[nudge] held")
+				} else if err != nil {
 					opt.log("[nudge] failed: %v", err)
 				} else {
 					opt.log("[nudge] %s", note)
@@ -791,10 +957,11 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 }
 
 func branchSteer(br judge.Branch, jd *judge.Judgment, mode string) string {
-	if jd != nil && br.Open() && jd.BranchDone(judge.DefaultBranchDone) {
+	leaving := jd != nil && jd.Yields(br.Kind)
+	if jd != nil && br.Open() && jd.BranchDone(judge.DefaultBranchDone) && !leaving {
 		return " The task you were on is finished. You may say so in one short line. Do not invent extra results."
 	}
-	if br.Open() {
+	if br.Open() && !leaving {
 		note := " You are still on " + br.Kind + ". Goal: " + clip(br.Goal, 120) + "."
 		if br.Note != "" {
 			note += " Progress: " + clip(br.Note, 80) + "."
@@ -819,7 +986,8 @@ func branchSteer(br judge.Branch, jd *judge.Judgment, mode string) string {
 	return ""
 }
 
-// dispatchCapability keeps one open branch until the entry Jev says it is done.
+// dispatchCapability keeps one open branch for follow-ups until branch_done.
+// An explicit different act leaves that branch immediately and starts the new one.
 // A cooled turn does not open, close, or start work.
 func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 	jc *jev.Client, lc *llm.Client, mem *memory.Memory, pl *planner.Planner,
@@ -853,7 +1021,8 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 	hands := act == judge.ActComputerUse || act == judge.ActCodex
 	making := judge.IsStudio(act)
 	sensing := judge.IsPercept(act)
-	if (hands || making || sensing) && mode == "safety" {
+	telling := act == judge.ActDivine
+	if (hands || making || sensing || telling) && mode == "safety" {
 		opt.log("[branch] held %s", act)
 		return
 	}
@@ -863,6 +1032,10 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 	}
 	if sensing && !continuing && !jd.PerceptAllowed(mode) {
 		opt.log("[act] %s held mode=%s", act, orDash(mode))
+		return
+	}
+	if telling && !continuing && !jd.DivineAllowed(mode) {
+		opt.log("[act] divine held mode=%s", orDash(mode))
 		return
 	}
 	if hands && !continuing {
@@ -879,7 +1052,10 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 		slot.follow(userText)
 		opt.log("[branch] stay %s", act)
 	} else {
-		if slot.busy() {
+		if open.Kind != "" && open.Kind != act {
+			opt.log("[branch] leave %s", open.Kind)
+			slot.close()
+		} else if slot.busy() {
 			slot.close()
 		}
 		slot.open(act, userText)
@@ -888,27 +1064,30 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 	switch act {
 	case judge.ActComputerUse:
 		ensureHands(ctx, opt, jc, lc, mem, sess, slot, act, "")
-	case judge.ActCodex:
-		ensureHands(ctx, opt, jc, lc, mem, sess, slot, act, "codex")
 	case judge.ActImage, judge.ActVideo, judge.ActSpeech, judge.ActSong:
-		ensureStudio(ctx, opt, lc, sess, slot, act)
+		if opt.stageQ != nil {
+			startQueued(ctx, opt, nil, lc, sess, slot, act, continuing)
+		} else {
+			ensureStudio(ctx, opt, lc, sess, slot, act)
+		}
 	case judge.ActPicture, judge.ActWatch, judge.ActListen:
 		ensurePercept(ctx, opt, lc, sess, slot, act)
-	case judge.ActReflect:
-		if !continuing {
-			startReflect(opt, p, sess, jd, mode, userText)
-		}
+	case judge.ActReflect, judge.ActLook, judge.ActCodex:
+		ensureSelf(ctx, opt, p, jc, lc, sess, slot, jd, act, mode)
 	case judge.ActCamera:
 		startSight(ctx, opt, p, sess, eye.SourceCamera, continuing)
 	case judge.ActScreen:
 		startSight(ctx, opt, p, sess, eye.SourceScreen, continuing)
-	case judge.ActLook:
-		if !continuing {
-			startLook(opt, p, sess, userText)
-		}
+	case judge.ActDivine:
+		ensureDivine(ctx, opt, p, lc, sess, slot, userText, continuing)
 	case judge.ActPlan:
-		if thresh <= 0 {
+		if opt.stageQ != nil {
+			startQueued(ctx, opt, pl, lc, sess, slot, judge.ActPlan, continuing)
+		} else if thresh <= 0 {
 			thresh = judge.DefaultNeedLLM
+		}
+		if opt.stageQ != nil {
+			break
 		}
 		score := jd.NeedLLMP
 		if score < thresh {
@@ -1198,29 +1377,6 @@ func runPercept(ctx context.Context, opt Options, lc *llm.Client, sess *livevoic
 	slot.close()
 }
 
-func startReflect(opt Options, p *persona.Persona, sess *livevoice.Session, jd *judge.Judgment, mode, userText string) {
-	if opt.sense == nil || p == nil || !p.Sense.Enabled {
-		opt.log("[act] reflect unavailable")
-		return
-	}
-	self, tracking := "", ""
-	if jd != nil {
-		self = jd.SelfEmotion
-		tracking = jd.Emotion
-	}
-	note := fmt.Sprintf("This turn you were steered as %s. Your feeling: %s. You were tracking them as %s. Notice yourself from this. ",
-		orDash(mode), orDash(self), orDash(tracking))
-	ask := sense.ParseAsk(userText)
-	if ask.Kind != sense.AskBody && ask.Kind != sense.AskExistence {
-		if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskBody}, "log"); felt != "" {
-			note += felt
-		}
-	}
-	opt.sense.Emit(sense.Event{Kind: sense.KindLook, Summary: "reflect"})
-	voiceSteer(opt, sess, note)
-	voiceNudge(opt, sess, "They asked you to notice yourself. Answer from that sensation, in character, short. Do not recite a manual.")
-}
-
 func startSight(ctx context.Context, opt Options, p *persona.Persona, sess *livevoice.Session, source string, again bool) {
 	if opt.eyes == nil {
 		opt.log("[act] %s unavailable", source)
@@ -1232,8 +1388,10 @@ func startSight(ctx context.Context, opt Options, p *persona.Persona, sess *live
 		opt.log("[act] %s %s", source, clip(g.Caption, 80))
 		if opt.sense != nil {
 			if felt := opt.sense.Felt(p, sense.Ask{Kind: sightAsk(source)}, source); felt != "" {
-				if err := sess.Steer(livevoice.FitTail(felt)); err != nil {
+				if err := sess.Steer(livevoice.FitTail(felt)); err != nil && !errors.Is(err, livevoice.ErrHeld) {
 					opt.log("[act] %s steer failed: %v", source, err)
+				} else if errors.Is(err, livevoice.ErrHeld) {
+					opt.log("[steer] skipped")
 				}
 			}
 		}
@@ -1277,36 +1435,21 @@ func glanceCommand(ctx context.Context, opt Options, p *persona.Persona, sess *l
 	}
 	opt.sense.Emit(sense.Event{Kind: sense.KindCommand, Summary: "/" + source})
 	if felt := opt.sense.Felt(p, sense.Ask{Kind: sightAsk(source)}, source); felt != "" {
-		if err := sess.Steer(livevoice.FitTail(felt)); err != nil {
+		if err := sess.Steer(livevoice.FitTail(felt)); errors.Is(err, livevoice.ErrHeld) {
+			opt.log("[steer] skipped")
+		} else if err != nil {
 			opt.log("[%s] steer failed: %v", source, err)
 		}
 	}
-}
-
-func startLook(opt Options, p *persona.Persona, sess *livevoice.Session, userText string) {
-	if opt.sense == nil {
-		opt.log("[act] look unavailable")
-		return
-	}
-	ask := sense.ParseAsk(userText)
-	if ask.Kind != sense.AskFile && ask.Kind != sense.AskCode {
-		ask = sense.Ask{Kind: sense.AskCode}
-		opt.log("[act] look")
-		if felt := opt.sense.Felt(p, ask, ""); felt != "" {
-			voiceSteer(opt, sess, felt)
-		}
-	} else {
-		opt.log("[act] look already in the turn note")
-	}
-	opt.sense.Emit(sense.Event{Kind: sense.KindLook, Summary: "look"})
-	voiceNudge(opt, sess, "They asked how you are made. Answer from the note about your own code, in character, short. Do not recite source unless they asked to hear a line.")
 }
 
 func voiceSteer(opt Options, sess *livevoice.Session, text string) {
 	if sess == nil || strings.TrimSpace(text) == "" {
 		return
 	}
-	if err := sess.Steer(text); err != nil {
+	if err := sess.Steer(text); errors.Is(err, livevoice.ErrHeld) {
+		opt.log("[steer] skipped")
+	} else if err != nil {
 		opt.log("[act] steer failed: %v", err)
 	}
 }
@@ -1315,9 +1458,95 @@ func voiceNudge(opt Options, sess *livevoice.Session, text string) {
 	if sess == nil || strings.TrimSpace(text) == "" {
 		return
 	}
-	if err := sess.Nudge(text); err != nil {
+	if err := sess.Nudge(text); errors.Is(err, livevoice.ErrHeld) {
+		opt.log("[nudge] held")
+	} else if err != nil {
 		opt.log("[act] nudge failed: %v", err)
 	}
+}
+
+// ensureDivine keeps one six-line plate for the open branch.
+// A follow-up rereads that plate. A new toss happens only when they ask.
+func ensureDivine(ctx context.Context, opt Options, p *persona.Persona, lc *llm.Client,
+	sess *livevoice.Session, slot *capabilitySlot, userText string, continuing bool) {
+	if slot.busy() {
+		opt.log("[divine] still reading")
+		return
+	}
+	ok, gen := slot.tryComputer()
+	if !ok {
+		opt.log("[divine] busy")
+		return
+	}
+	fresh := !continuing || oracle.WantsRecast(userText) || strings.TrimSpace(slot.holdText()) == ""
+	if fresh {
+		plate, err := oracle.Cast(time.Now(), 0)
+		if err != nil {
+			opt.log("[divine] cast failed: %v", err)
+			slot.endComputer(gen)
+			return
+		}
+		slot.setHold(plate.Prompt())
+		slot.setNote(plate.Glance())
+		if opt.sense != nil {
+			opt.sense.Emit(sense.Event{Kind: sense.KindDivine, Summary: "divine start", Data: map[string]any{"glance": plate.Glance()}})
+		}
+		voiceNudge(opt, sess, "You just cast three coins, six times, for their question. Tell them in one short in-character line that the coins are down and you are reading them. Do not give the omen yet.")
+	}
+	_, goal, glance := slot.current()
+	plateText := slot.holdText()
+	if lc == nil {
+		runOracle(ctx, opt, p, nil, sess, goal, plateText, glance)
+		slot.endComputer(gen)
+		return
+	}
+	go func() {
+		defer slot.endComputer(gen)
+		runCtx := slot.bind(context.Background())
+		runOracle(runCtx, opt, p, lc, sess, goal, plateText, glance)
+	}()
+}
+
+func runOracle(ctx context.Context, opt Options, p *persona.Persona, lc *llm.Client,
+	sess *livevoice.Session, question, plate, glance string) {
+	if opt.sense != nil {
+		opt.sense.Emit(sense.Event{Kind: sense.KindDivine, Summary: "divine read"})
+	}
+	if lc == nil {
+		voiceNudge(opt, sess, divineNudge(oracle.Reading{}, glance, true))
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	name, style := "", ""
+	if p != nil {
+		name, style = p.Name, p.Style
+	}
+	rd, err := oracle.Read(ctx, lc, name, style, plate, question)
+	if err != nil {
+		opt.log("[divine] read failed: %v", err)
+		voiceNudge(opt, sess, divineNudge(oracle.Reading{}, glance, true))
+		return
+	}
+	opt.log("[divine] omen=%s focus=%s", rd.Omen, clip(rd.Focus, 40))
+	voiceNudge(opt, sess, divineNudge(rd, glance, false))
+}
+
+func divineNudge(rd oracle.Reading, glance string, failed bool) string {
+	if rd.Omen == "refuse" {
+		note := strings.TrimSpace(rd.Note)
+		if note == "" {
+			note = "Stay with them."
+		}
+		return "Do not tell a fortune. Stay with them, in character, short. " + note
+	}
+	if failed || strings.TrimSpace(rd.Note) == "" {
+		return "The coins are down but the reading did not settle. Name the cast if you have it (" + orDash(glance) + ") and say you are still looking. Do not invent an omen."
+	}
+	return "A six-line cast is ready. Say it in character, two or three sentences, in their language. " +
+		"Do not recite every line. Do not claim their future is fixed. " +
+		"Omen tone: " + orDash(rd.Omen) + ". What to convey: " + rd.Note +
+		". If they ask which hexagram, the cast is " + orDash(glance) + "."
 }
 
 // handleCommand processes a slash command; returns true to quit.
@@ -1330,6 +1559,14 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 	switch {
 	case line == "/quit", line == "/q":
 		return true
+	case line == "/off":
+		if opt.power != nil {
+			opt.power.Set(false)
+		}
+	case line == "/on":
+		if opt.power != nil {
+			opt.power.Set(true)
+		}
 	case line == "/status":
 		if opt.sense != nil {
 			live := opt.sense.Live()
@@ -1348,12 +1585,16 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 		opt.log("[sense]\n%s", raw)
 		opt.sense.Emit(sense.Event{Kind: sense.KindCommand, Summary: "/sense"})
 		if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskBody}, ""); felt != "" {
-			if err := sess.Steer(felt); err != nil {
+			if err := sess.Steer(felt); errors.Is(err, livevoice.ErrHeld) {
+				opt.log("[steer] skipped")
+			} else if err != nil {
 				opt.log("[sense] steer failed: %v", err)
 			}
 		}
 		if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskLog}, "log"); felt != "" {
-			if err := sess.Steer(felt); err != nil {
+			if err := sess.Steer(felt); errors.Is(err, livevoice.ErrHeld) {
+				opt.log("[steer] skipped")
+			} else if err != nil {
 				opt.log("[sense] log steer failed: %v", err)
 			}
 		}
@@ -1371,7 +1612,9 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 		opt.log("[look] %s lines=%d clipped=%v", view.Path, view.Lines, view.Clipped)
 		opt.sense.Emit(sense.Event{Kind: sense.KindLook, Summary: view.Path})
 		if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskFile, File: view.Path}, ""); felt != "" {
-			if err := sess.Steer(felt); err != nil {
+			if err := sess.Steer(felt); errors.Is(err, livevoice.ErrHeld) {
+				opt.log("[steer] skipped")
+			} else if err != nil {
 				opt.log("[look] steer failed: %v", err)
 			}
 		}
@@ -1379,28 +1622,6 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 		glanceCommand(ctx, opt, p, sess, eye.SourceCamera)
 	case line == "/screen", line == "/see screen":
 		glanceCommand(ctx, opt, p, sess, eye.SourceScreen)
-	case line == "/eyes" || strings.HasPrefix(line, "/eyes "):
-		if opt.eyes == nil {
-			opt.log("eyes down (pass -vision=both and sense.eyes: true)")
-			break
-		}
-		arg := strings.TrimSpace(strings.TrimPrefix(line, "/eyes"))
-		switch arg {
-		case "", "toggle":
-			opt.eyes.SetEnabled(!opt.eyes.Enabled())
-		case "status":
-			if opt.eyes.Enabled() {
-				opt.log("[eyes] on")
-			} else {
-				opt.log("[eyes] off")
-			}
-		case "on", "1", "true":
-			opt.eyes.SetEnabled(true)
-		case "off", "0", "false":
-			opt.eyes.SetEnabled(false)
-		default:
-			opt.log("usage: /eyes on|off")
-		}
 	case line == "/see":
 		opt.log("camera and screen are separate: /camera or /screen")
 	case strings.HasPrefix(line, "/say "):
@@ -1408,12 +1629,16 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 			opt.log("speak failed: %v", err)
 		}
 	case strings.HasPrefix(line, "/steer "):
-		if err := sess.Steer(strings.TrimPrefix(line, "/steer ")); err != nil {
+		if err := sess.Steer(strings.TrimPrefix(line, "/steer ")); errors.Is(err, livevoice.ErrHeld) {
+			opt.log("[steer] skipped")
+		} else if err != nil {
 			opt.log("steer failed: %v", err)
 		}
 	case strings.HasPrefix(line, "/goal "):
 		pl.SetNote(strings.TrimPrefix(line, "/goal "))
 		opt.log("goal set")
+	case line == "/stage" || strings.HasPrefix(line, "/stage "):
+		stageCommand(opt.runCtx(ctx), opt, lc, sess, line)
 	case strings.HasPrefix(line, "/desk "):
 		goal := strings.TrimSpace(strings.TrimPrefix(line, "/desk "))
 		if goal == "" {
@@ -1422,7 +1647,7 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 		}
 		opt.log("[desk] starting: %s", goal)
 		go func() {
-			rep, err := desk.Run(ctx, desk.Options{
+			rep, err := desk.Run(opt.runCtx(ctx), desk.Options{
 				Goal:   goal,
 				Prefer: "",
 				Jev:    jc,
@@ -1437,6 +1662,23 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 			opt.log("[desk] status=%s steps=%d", rep.Status, len(rep.Steps))
 			opt.sense.Emit(sense.Event{Kind: sense.KindDesk, Summary: "desk " + rep.Status})
 		}()
+	case line == "/divine" || strings.HasPrefix(line, "/divine "):
+		q := strings.TrimSpace(strings.TrimPrefix(line, "/divine"))
+		if q == "" {
+			opt.log("divine needs a question")
+			break
+		}
+		plate, err := oracle.Cast(time.Now(), 0)
+		if err != nil {
+			opt.log("[divine] cast failed: %v", err)
+			break
+		}
+		opt.log("[divine] %s", plate.Glance())
+		if opt.sense != nil {
+			opt.sense.Emit(sense.Event{Kind: sense.KindDivine, Summary: "divine start", Data: map[string]any{"glance": plate.Glance()}})
+		}
+		voiceNudge(opt, sess, "You just cast three coins, six times, for their question. Tell them in one short in-character line that the coins are down and you are reading them. Do not give the omen yet.")
+		go runOracle(opt.runCtx(ctx), opt, p, lc, sess, q, plate.Prompt(), plate.Glance())
 	case strings.HasPrefix(line, "/codex "):
 		goal := strings.TrimSpace(strings.TrimPrefix(line, "/codex "))
 		if goal == "" {
@@ -1449,7 +1691,7 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 		}
 		opt.log("[codex] starting model=%s: %s", model, goal)
 		go func() {
-			rep, err := desk.Run(ctx, desk.Options{
+			rep, err := desk.Run(opt.runCtx(ctx), desk.Options{
 				Goal:       goal,
 				Driver:     "codex",
 				CodexModel: model,
@@ -1464,7 +1706,7 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 			opt.sense.Emit(sense.Event{Kind: sense.KindDesk, Summary: "codex " + rep.Status})
 		}()
 	default:
-		opt.log("unknown command (try /say /steer /goal /look /camera /screen /eyes /sense /desk /codex /status /quit)")
+		opt.log("unknown command (try /say /steer /goal /look /camera /screen /sense /stage /desk /codex /divine /off /on /status /quit)")
 	}
 	return false
 }

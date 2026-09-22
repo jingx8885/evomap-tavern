@@ -79,6 +79,7 @@ const (
 	ActPicture     = "picture"
 	ActWatch       = "watch"
 	ActListen      = "listen"
+	ActDivine      = "divine"
 )
 
 // DefaultFitThresh is the persona_fit noul below which steering snaps back.
@@ -107,6 +108,9 @@ type Judgment struct {
 	Attend       string                `json:"attend,omitempty"`
 	Act          string                `json:"act,omitempty"`
 	BranchDoneP  float64               `json:"branch_done,omitempty"`
+	Window       string                `json:"window,omitempty"`
+	WinOp        string                `json:"win_op,omitempty"`
+	WinTarget    string                `json:"win_target,omitempty"`
 	Raw          map[string]jev.Answer `json:"-"`
 }
 
@@ -129,6 +133,29 @@ type Observe struct {
 	Camera string
 	Screen string
 	Log    []string
+	Window WindowView
+}
+
+// WindowMod is one registered page module, as observation.
+type WindowMod struct {
+	ID    string
+	Title string
+	Open  bool
+}
+
+// WindowView is the closed set for her own pages this turn.
+// Empty Modules means the questions are not asked.
+type WindowView struct {
+	Focused string
+	Glance  string
+	Modules []WindowMod
+	Ops     map[string]string
+	Targets map[string]string
+}
+
+// Live reports whether a page module is registered.
+func (v WindowView) Live() bool {
+	return len(v.Modules) > 0
 }
 
 func scoreLevels() []string {
@@ -171,11 +198,12 @@ var AttendLabels = map[string]string{
 	"screen": "The screen note in state.observe.screen. They asked about the screen, or the window is what this utterance is about.",
 	"eyes":   "Both camera and screen. They asked what she can see, or both are relevant.",
 	"log":    "state.observe.log. They asked about her log, an error, or a fault she should know.",
+	"stage":  "state.window.glance. They asked what her stage window looks like, or the page is what this utterance is about.",
 	"all":    "Camera, screen, and the log. They asked about her whole situation, or a fault and the scene both matter.",
 }
 
 var knownAttend = map[string]bool{
-	"none": true, "camera": true, "screen": true, "eyes": true, "log": true, "all": true,
+	"none": true, "camera": true, "screen": true, "eyes": true, "log": true, "stage": true, "all": true,
 }
 
 // ActLabels is the only tool entry. One choice, then Go executes.
@@ -183,11 +211,11 @@ var knownAttend = map[string]bool{
 var ActLabels = map[string]string{
 	ActNone:        "Just talk. No tool, no desktop action, no extra look.",
 	ActPlan:        "A slower written plan or decision is needed. Not a desktop action.",
-	ActReflect:     "They asked her to notice herself: who she is, whether she can feel her voice, face, or mood, or a fault in her own log. Not a request to read a file, edit code, or use the computer.",
-	ActLook:        "They asked how she is built, what her own code does, or to feel a specific file in her body. Understanding, not editing.",
+	ActReflect:     "They asked her to notice herself: who she is, whether she can feel her voice, face, or mood, or a fault in her own log. Not a request to edit code or use the computer. A later step on this branch may read one file or remember one line.",
+	ActLook:        "They asked how she is built, what her own code does, or to feel a specific file in her body. This branch keeps reading. If they then ask her to change herself, a later step may edit one allowlisted file. It does not reload the running process.",
 	ActCamera:      "They asked her to look through the camera now: at them, the room, or who is there. Not the computer screen, and not a saved picture.",
 	ActScreen:      "They asked her to look at the computer screen now: which window or what is on the desktop. Computer-use window titles, not the camera, and not a saved picture.",
-	ActCodex:       "They want her to change her own source in this repository via Codex. Not a general desktop action, and not merely talking about code.",
+	ActCodex:       "They want her to change her own source. The runtime picks one allowlisted file, writes a strict intent, edits only that, then she feels the diff. Not a general desktop action, and not merely talking about code. The running process does not reload.",
 	ActComputerUse: "They want something done on this machine now that is not only editing her own repo: open an app, use a window, type, or act on the desktop. Not mere talk about computers.",
 	ActImage:       "They want a still picture made, or she is being asked to make one (a bouquet, a scene, an icon). Talking about a thing is not enough.",
 	ActVideo:       "They want a short moving clip made. Not a still picture, and not merely describing motion.",
@@ -196,6 +224,7 @@ var ActLabels = map[string]string{
 	ActPicture:     "They want her to look at a still picture that already exists, usually one she just made. Not a request to generate a new one, and not the live camera.",
 	ActWatch:       "They want her to watch a video that already exists, usually one she just made. Not a request to generate a new clip, and not the live camera.",
 	ActListen:      "They want her to listen to a song or voice recording that already exists. Not a request to compose a new song, and not her live microphone.",
+	ActDivine:      "They want a fortune told with the eight trigrams and six lines: 算命, 占卜, 起卦, 六爻, 算一卦. A metaphor about luck is not this. Not a plan, and not a desktop action.",
 }
 
 var knownAct = map[string]bool{
@@ -203,10 +232,11 @@ var knownAct = map[string]bool{
 	ActCamera: true, ActScreen: true, ActCodex: true, ActComputerUse: true,
 	ActImage: true, ActVideo: true, ActSpeech: true, ActSong: true,
 	ActPicture: true, ActWatch: true, ActListen: true,
+	ActDivine: true,
 }
 
 // questions builds the one-shot Jev question set for a turn.
-func questions(p *persona.Persona, withPersonaFit bool, planNote string, br Branch) map[string]jev.Question {
+func questions(p *persona.Persona, withPersonaFit bool, planNote string, br Branch, win WindowView) map[string]jev.Question {
 	qs := map[string]jev.Question{
 		"valence": {
 			Type: "score",
@@ -278,6 +308,7 @@ func questions(p *persona.Persona, withPersonaFit bool, planNote string, br Bran
 				"Pick none for ordinary chat. " +
 				"Pick camera, screen, or eyes only when they asked what she sees, " +
 				"or the note is clearly what the utterance is about. " +
+				"Pick stage when they asked what her stage window looks like. " +
 				"Pick log only when they asked about her log, an error, or a fault. " +
 				"Pick all only when both the scene and the log matter. " +
 				"Empty observe fields are not a reason to pick that channel. " +
@@ -292,11 +323,11 @@ func questions(p *persona.Persona, withPersonaFit bool, planNote string, br Bran
 				"Pick plan when a slower written decision is needed (a plan, a stuck " +
 				"conversation, something the live voice should not invent alone). " +
 				"Pick reflect when they ask her to notice herself, her mood, or a fault in her log. " +
-				"Pick look when they ask how she is built or what her own code does. Do not edit. " +
+				"Pick look when they ask how she is built or what her own code does. " +
 				"Pick camera only when they asked her to look through the camera now. " +
 				"Pick screen only when they asked her to look at the computer screen now. " +
 				"Camera and screen are different capabilities. Do not pick one to answer the other. " +
-				"Pick codex only when they want her to change her own source in this repo. " +
+				"Pick codex only when they want her to change her own source in this repo. One allowlisted file, then she feels the diff. " +
 				"Pick computer_use only when they are asking her to act on this machine " +
 				"now in a way that is not just editing her repo. " +
 				"Talking about code or computers is not codex or computer_use. " +
@@ -308,7 +339,9 @@ func questions(p *persona.Persona, withPersonaFit bool, planNote string, br Bran
 				"Pick picture only to look at an existing still image. " +
 				"Pick watch only to watch an existing video. " +
 				"Pick listen only to hear an existing song or recording. " +
-				"Looking is not the same as making.",
+				"Looking is not the same as making. " +
+				"Pick divine when they ask her to tell a fortune, cast a hexagram, or read 六爻. " +
+				"Talking about luck in passing is not divine.",
 			Criteria: criteriaCopy(ActLabels),
 		},
 	}
@@ -316,9 +349,11 @@ func questions(p *persona.Persona, withPersonaFit bool, planNote string, br Bran
 		act := qs["act"]
 		act.Instructions = fmt.Sprint(act.Instructions) +
 			" state.branch is already open (" + br.Kind + ")." +
-			" Keep act equal to that kind. The latest utterance belongs to the same branch" +
-			" (a correction, a follow-up, or small talk while she works)." +
-			" Pick a different act only when the branch is finished or they clearly cancel."
+			" Keep act equal to that kind for a correction, a follow-up, or small talk while she works." +
+			" Pick none to stay on it without starting another tool." +
+			" Pick a different act as soon as they ask for another capability" +
+			" (the screen, the camera, a fortune, a picture, the computer, or anything else in this list)." +
+			" They can leave the open branch at any time. Do not wait for it to finish."
 		qs["act"] = act
 		qs["branch_done"] = branchDoneQuestion()
 	}
@@ -339,7 +374,44 @@ func questions(p *persona.Persona, withPersonaFit bool, planNote string, br Bran
 				"or a different character.",
 		}
 	}
+	if win.Live() {
+		mods := map[string]string{"none": "Do not touch a page."}
+		for _, m := range win.Modules {
+			mods[m.ID] = m.Title + ". Her own page module, not a desktop window."
+		}
+		qs["window"] = jev.Question{
+			Type: "choice",
+			Instructions: "Which of her own page modules should win_op apply to? " +
+				"Read state.window. These are her pages, not the computer's other windows. " +
+				"Pick none to leave them alone.",
+			Criteria: criteriaCopy(mods),
+		}
+		qs["win_op"] = jev.Question{
+			Type: "choice",
+			Instructions: "What should the runtime do to that page module? " +
+				"Pick none to leave it. open and focus show it. hide and close cover it. " +
+				"Layout and feature ops belong to the module that declared them. " +
+				"Do not invent an op that is not listed.",
+			Criteria: criteriaAny(win.Ops),
+		}
+		if len(win.Targets) > 0 {
+			qs["win_target"] = jev.Question{
+				Type: "choice",
+				Instructions: "Which job should feature or cancel use? " +
+					"Pick none to leave the featured job. Pick latest for the newest. " +
+					"Ids come from state.window.targets. Do not invent an id.",
+				Criteria: criteriaAny(win.Targets),
+			}
+		}
+	}
 	return qs
+}
+
+func criteriaAny(src map[string]string) map[string]any {
+	if len(src) == 0 {
+		return map[string]any{"none": "Leave it."}
+	}
+	return criteriaCopy(src)
 }
 
 func scoreNorm(a jev.Answer) float64 {
@@ -432,6 +504,50 @@ func Parse(userText string, ans map[string]jev.Answer) Judgment {
 	return j
 }
 
+func (v WindowView) allowModule(id string) bool {
+	if id == "none" {
+		return true
+	}
+	for _, m := range v.Modules {
+		if m.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (v WindowView) allowOp(op string) bool {
+	if op == "" {
+		return false
+	}
+	_, ok := v.Ops[op]
+	return ok
+}
+
+func (v WindowView) allowTarget(id string) bool {
+	if id == "" {
+		return false
+	}
+	_, ok := v.Targets[id]
+	return ok
+}
+
+// takeWindow keeps only choices that were in this turn's closed set.
+func takeWindow(j *Judgment, v WindowView) {
+	if j == nil || !v.Live() || j.Raw == nil {
+		return
+	}
+	if a, ok := j.Raw["window"]; ok && v.allowModule(a.Choice) {
+		j.Window = a.Choice
+	}
+	if a, ok := j.Raw["win_op"]; ok && v.allowOp(a.Choice) {
+		j.WinOp = a.Choice
+	}
+	if a, ok := j.Raw["win_target"]; ok && v.allowTarget(a.Choice) {
+		j.WinTarget = a.Choice
+	}
+}
+
 func branchDoneQuestion() jev.Question {
 	return jev.Question{
 		Type: "noul",
@@ -467,13 +583,18 @@ func (j *Judgment) BranchDone(thresh float64) bool {
 	return j.BranchDoneP >= thresh
 }
 
-// Stay is the branch latch. An open branch keeps its kind until branch_done.
-// A different act on this turn does not cut it short. When it is done, the
-// returned act is whatever the entry picked next (often none).
+// Stay is the branch latch. An open branch keeps its kind for follow-ups
+// (act none, or the same act) until branch_done. An explicit different act
+// leaves immediately: the returned act is the new one, and done stays false
+// so the runtime does not announce the old task as finished.
+// When branch_done does fire, the returned act is whatever the entry picked next.
 func (j *Judgment) Stay(open string, needThresh, doneThresh float64) (act string, done bool) {
 	if knownAct[open] && open != "" && open != ActNone {
 		if j != nil && j.BranchDone(doneThresh) {
 			return j.Capability(needThresh), true
+		}
+		if j.Yields(open) {
+			return j.Act, false
 		}
 		return open, false
 	}
@@ -481,6 +602,15 @@ func (j *Judgment) Stay(open string, needThresh, doneThresh float64) (act string
 		return ActNone, false
 	}
 	return j.Capability(needThresh), false
+}
+
+// Yields reports whether this turn picked a different tool than the open branch.
+// act none, an omitted act, and the same act do not leave.
+func (j *Judgment) Yields(open string) bool {
+	if j == nil || !knownAct[open] || open == "" || open == ActNone {
+		return false
+	}
+	return knownAct[j.Act] && j.Act != ActNone && j.Act != open
 }
 
 // Capability is the tool this turn may start.
@@ -535,6 +665,11 @@ func IsPercept(act string) bool {
 	default:
 		return false
 	}
+}
+
+// DivineAllowed is the outer latch for a six-line cast.
+func (j *Judgment) DivineAllowed(mode string) bool {
+	return j.actAllowed(mode, ActDivine)
 }
 
 // PerceptAllowed is the outer latch for seeing or hearing an existing file.
@@ -629,7 +764,12 @@ func JudgeTurn(ctx context.Context, client *jev.Client, p *persona.Persona,
 			"otherwise infer the user's likely state from the latest exchange. " +
 			"observe is what she could look at; attend chooses a channel, it does not rewrite it. " +
 			"act is the only tool entry. " +
-			"If branch is present, stay on it until branch_done is yes.",
+			"If branch is present, stay on it until branch_done is yes. " +
+			"window is her own page module, not a desktop window. " +
+			"state.window.glance says what that page looks like; do not rewrite it.",
+	}
+	if obs.Window.Live() {
+		state["window"] = windowState(obs.Window)
 	}
 	if br.Open() {
 		state["branch"] = map[string]any{
@@ -638,11 +778,12 @@ func JudgeTurn(ctx context.Context, client *jev.Client, p *persona.Persona,
 			"progress": clipObserve(br.Note, 240),
 		}
 	}
-	res, err := client.Evaluate(ctx, state, questions(p, latest["assistant"] != "", planNote, br))
+	res, err := client.Evaluate(ctx, state, questions(p, latest["assistant"] != "", planNote, br, obs.Window))
 	if err != nil {
 		return nil, err
 	}
 	jd := Parse(userText, res.Answers)
+	takeWindow(&jd, obs.Window)
 	return &jd, nil
 }
 
@@ -673,6 +814,19 @@ func JudgeBranchDone(ctx context.Context, client *jev.Client, br Branch, recent 
 	}
 	jd := Parse("", res.Answers)
 	return jd.BranchDoneP, nil
+}
+
+func windowState(v WindowView) map[string]any {
+	mods := make([]map[string]any, 0, len(v.Modules))
+	for _, m := range v.Modules {
+		mods = append(mods, map[string]any{"id": m.ID, "title": m.Title, "open": m.Open})
+	}
+	return map[string]any{
+		"focused": v.Focused,
+		"glance":  clipObserve(v.Glance, 500),
+		"modules": mods,
+		"targets": v.Targets,
+	}
 }
 
 func observeState(obs Observe) map[string]any {

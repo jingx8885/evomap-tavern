@@ -28,6 +28,7 @@ func TestParseAsk(t *testing.T) {
 		{"can you see me", AskCamera, ""},
 		{"看看你的日志", AskLog, ""},
 		{"你能看到自己的日志吗", AskLog, ""},
+		{"这个窗口长什么样", AskWindow, ""},
 	}
 	for _, c := range cases {
 		got := ParseAsk(c.in)

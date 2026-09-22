@@ -24,6 +24,7 @@ import (
 	"github.com/jingx8885/lov-evo/internal/livevoice"
 	"github.com/jingx8885/lov-evo/internal/llm"
 	"github.com/jingx8885/lov-evo/internal/memory"
+	"github.com/jingx8885/lov-evo/internal/oracle"
 	"github.com/jingx8885/lov-evo/internal/persona"
 	"github.com/jingx8885/lov-evo/internal/planner"
 	"github.com/jingx8885/lov-evo/internal/sense"
@@ -49,6 +50,8 @@ func main() {
 		os.Exit(cmdPlan(args))
 	case "desk":
 		os.Exit(cmdDesk(args))
+	case "divine":
+		os.Exit(cmdDivine(args))
 	case "codex":
 		os.Exit(cmdDesk(append([]string{"--driver", "codex"}, args...)))
 	case "doctor":
@@ -79,6 +82,7 @@ Commands:
   judge   judge one text with Jev (no voice)
   plan    force one async planner refresh (prints the resulting note)
   desk    Jev-driven computer use: snapshot, Cursor chat, or Codex exec
+  divine  cast a six-line hexagram; -read asks the planner LLM to interpret
   codex   skip Jev; drive Codex with gpt-5.6-luna on the new-api gateway
   doctor    local environment check (no network)
   ctxprobe  experiment with session.context.append channels
@@ -132,7 +136,6 @@ func cmdRun(args []string) int {
 	quitAfter := fs.Duration("quit-after", 0, "exit after this duration (0 = until Ctrl+C / /quit)")
 	vision := fs.String("vision", "both", "eyes: both, camera, screen (computer-use), or off")
 	visionModel := fs.String("vision-model", config.DefaultVisionModel, "multimodal captioner")
-	visionEvery := fs.Duration("vision-every", 10*time.Second, "how often to sample camera/screen")
 	fs.Parse(args)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -157,7 +160,6 @@ func cmdRun(args []string) int {
 		Say:          *say,
 		Vision:       *vision,
 		VisionModel:  *visionModel,
-		VisionEvery:  *visionEvery,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -361,6 +363,38 @@ func cmdPlan(args []string) int {
 		time.Sleep(200 * time.Millisecond)
 	}
 	fmt.Println("note:", pl.Current())
+	return 0
+}
+
+func cmdDivine(args []string) int {
+	fs := flag.NewFlagSet("divine", flag.ExitOnError)
+	baseURL, _, key, _ := commonFlags(fs)
+	seed := fs.Int64("seed", 1, "coin seed; 0 tosses at random")
+	read := fs.Bool("read", false, "ask the planner LLM to interpret the plate")
+	model := fs.String("planner-model", config.DefaultPlannerModel, "reader LLM")
+	fs.Parse(args)
+	q := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	if q == "" {
+		q = "所问之事"
+	}
+	plate, err := oracle.Cast(time.Now(), *seed)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	fmt.Println(plate.Glance())
+	fmt.Println(plate.Prompt())
+	if !*read {
+		return 0
+	}
+	rd, err := oracle.Read(context.Background(),
+		llm.NewClient(config.ResolveBaseURL(*baseURL), mustKey(*key), *model),
+		"", "", plate.Prompt(), q)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	fmt.Printf("omen: %s\nfocus: %s\nnote: %s\n", rd.Omen, rd.Focus, rd.Note)
 	return 0
 }
 

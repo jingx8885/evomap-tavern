@@ -30,6 +30,25 @@ var Organs = []Organ{
 	{Path: "internal/sense", Role: "self", Feel: "this layer: how you feel yourself"},
 	{Path: "internal/eye", Role: "eyes", Feel: "two separate looks: camera pixels, and computer-use window titles"},
 	{Path: "internal/desk", Role: "hands", Feel: "how you look at and act on this computer, through Jev"},
+	{Path: "internal/oracle", Role: "oracle", Feel: "the six-line cast: coins, najia, and the plate you read before you speak"},
+	{Path: "internal/window", Role: "stage", Feel: "a page module: the queue of pictures, clips, and notes, and what that window looks like"},
+}
+
+// writePref is the only source she may change. Safety latches
+// (judge, agent, desk, livevoice, jev) stay readable and not writable.
+var writePref = []string{
+	"personas/",
+	"internal/sense/",
+	"internal/steering/",
+	"internal/planner/",
+	"internal/memory/",
+	"internal/avatar/",
+	"internal/window/",
+	"internal/oracle/",
+	"internal/eye/",
+	"web/live2d/app.js",
+	"web/live2d/index.html",
+	"web/live2d/style.css",
 }
 
 var allowPref = []string{
@@ -109,6 +128,21 @@ func isRoot(dir string) bool {
 	}
 	first, _, _ := strings.Cut(string(raw), "\n")
 	return strings.TrimSpace(first) == "module "+modulePath
+}
+
+// Writable reports whether rel is a source file she may edit.
+// Readable safety latches are not writable.
+func Writable(rel string) bool {
+	rel = cleanRel(rel)
+	if !allowed(rel) {
+		return false
+	}
+	for _, a := range writePref {
+		if rel == strings.TrimSuffix(a, "/") || strings.HasPrefix(rel, a) || rel == a {
+			return true
+		}
+	}
+	return false
 }
 
 func allowed(rel string) bool {

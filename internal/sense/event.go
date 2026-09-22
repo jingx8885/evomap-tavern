@@ -20,6 +20,8 @@ const (
 	KindCommand = "command"
 	KindError   = "error"
 	KindWarning = "warning"
+	KindStage   = "stage"
+	KindDivine  = "divine"
 )
 
 // Event is one moment she (or an operator) can look back at.

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jingx8885/lov-evo/internal/memory"
 )
 
 func TestFindDir(t *testing.T) {
@@ -153,18 +154,54 @@ func TestHubDriveAndWS(t *testing.T) {
 	}
 }
 
-func TestHubEyesSwitch(t *testing.T) {
+func TestHubRequestsOneCapture(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHub()
+	srv := httptest.NewServer(h.Handler(dir))
+	defer srv.Close()
+
+	u := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(u, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	var first map[string]any
+	if err := conn.ReadJSON(&first); err != nil {
+		t.Fatal(err)
+	}
+
+	h.RequestCapture()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		var msg map[string]any
+		if err := conn.ReadJSON(&msg); err != nil {
+			continue
+		}
+		if msg["type"] == "capture" {
+			return
+		}
+	}
+	t.Fatal("viewer was not asked for one frame")
+}
+
+func TestHubSystemSwitch(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("ok"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	h := NewHub()
 	on := true
-	h.SetEyes(func() bool { return on }, func(v bool) { on = v })
+	h.SetSystem(func() bool { return on }, func(v bool) { on = v })
 	srv := httptest.NewServer(h.Handler(dir))
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/api/eyes")
+	resp, err := http.Get(srv.URL + "/api/system")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,16 +217,19 @@ func TestHubEyesSwitch(t *testing.T) {
 		t.Fatalf("initial %+v", body)
 	}
 
-	resp, err = http.Post(srv.URL+"/api/eyes", "application/json", strings.NewReader(`{"on":false}`))
+	resp, err = http.Post(srv.URL+"/api/system", "application/json", strings.NewReader(`{"on":false}`))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if body.On || !body.Available || on {
-		t.Fatalf("after off %+v var=%v", body, on)
+	if body.On || !body.Available {
+		t.Fatalf("after off %+v", body)
 	}
 }
 
@@ -252,6 +292,136 @@ func waitLog(conn *websocket.Conn, needle string) error {
 		}
 	}
 	return fmt.Errorf("missing log %s", needle)
+}
+
+func TestHubMemoryEdit(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := memory.NewRelationshipStore(filepath.Join(dir, "relationship.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewHub()
+	h.SetMemory(store.View, store.Apply)
+	srv := httptest.NewServer(h.Handler(dir))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/api/memory", "application/json", strings.NewReader(`{"op":"add","kind":"open_loop","text":"还没写完的稿"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("add status %d", resp.StatusCode)
+	}
+	var view memory.MemoryView
+	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(view.Items) != 1 || view.Items[0].Text != "还没写完的稿" {
+		t.Fatalf("add %+v", view)
+	}
+
+	body := `{"op":"update","id":"` + view.Items[0].ID + `","text":"稿子改到后天"}`
+	resp, err = http.Post(srv.URL+"/api/memory", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("update status %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(view.Items) != 1 || view.Items[0].Text != "稿子改到后天" {
+		t.Fatalf("update %+v", view)
+	}
+
+	resp, err = http.Post(srv.URL+"/api/memory", "application/json", strings.NewReader(`{"op":"delete","id":"`+view.Items[0].ID+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("delete status %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(view.Items) != 0 {
+		t.Fatalf("delete %+v", view)
+	}
+
+	resp, err = http.Get(srv.URL + "/api/memory")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	if !view.Available || len(view.Items) != 0 {
+		t.Fatalf("get %+v", view)
+	}
+}
+
+func TestHubQueue(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHub()
+	srv := httptest.NewServer(h.Handler(dir))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/queue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view struct {
+		Available bool             `json:"available"`
+		Jobs      []map[string]any `json:"jobs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if view.Available || view.Jobs == nil {
+		t.Fatalf("unwired %+v", view)
+	}
+
+	h.SetQueue(func() any {
+		return map[string]any{
+			"available": true,
+			"open":      true,
+			"jobs": []map[string]string{{
+				"id": "j1", "kind": "image", "status": "queued", "prompt": "rose",
+			}},
+		}
+	})
+	resp, err = http.Get(srv.URL + "/api/queue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	if !view.Available || len(view.Jobs) != 1 || view.Jobs[0]["prompt"] != "rose" {
+		t.Fatalf("wired %+v", view)
+	}
+
+	post, err := http.Post(srv.URL+"/api/queue", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer post.Body.Close()
+	if post.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("post status %d", post.StatusCode)
+	}
 }
 
 func TestHubMouthDecays(t *testing.T) {

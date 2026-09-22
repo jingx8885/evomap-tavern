@@ -51,57 +51,37 @@ func TestThumbDeltaDetectsChange(t *testing.T) {
 	}
 }
 
-func TestParallelCameraAndScreen(t *testing.T) {
+func TestStartDoesNotSample(t *testing.T) {
 	var vlm atomic.Int32
-	llm := fakeVision{fn: func(_ context.Context, _, src string, _ []byte) (string, error) {
-		vlm.Add(1)
-		return "摄像头里有个人坐着。", nil
-	}}
-	obsN := atomic.Int32{}
-	e := New(Options{
-		Camera:   true,
-		Screen:   true,
-		Interval: 30 * time.Millisecond,
-		Cooldown: time.Millisecond,
-		Jev:      fakeEval{noteworthy: 0.9, private: 0.1, mention: 0.1},
-		LLM:      llm,
+	var obs atomic.Int32
+	e := Start(context.Background(), Options{
+		Camera: true,
+		Screen: true,
+		Jev:    fakeEval{noteworthy: 0.9, private: 0.1, mention: 0.9},
+		LLM: fakeVision{fn: func(context.Context, string, string, []byte) (string, error) {
+			vlm.Add(1)
+			return "摄像头里有个人坐着。", nil
+		}},
 		Observe: func(context.Context) (ScreenView, error) {
-			obsN.Add(1)
+			obs.Add(1)
 			return ScreenView{Caption: "前台 Cursor · lov-evo（coding）", Signature: "sig1"}, nil
 		},
 	})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go e.sampleScreen(ctx)
-	go e.loop(ctx)
-
 	if err := e.pushJPEG(SourceCamera, SolidJPEG(48, 48, color.RGBA{R: 200, G: 40, B: 40, A: 255})); err != nil {
 		t.Fatal(err)
 	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		s := e.Snapshot()
-		if s.Camera.Caption != "" && s.Screen.Caption != "" {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+	time.Sleep(80 * time.Millisecond)
+	if vlm.Load() != 0 || obs.Load() != 0 {
+		t.Fatalf("start sampled on its own vlm=%d obs=%d", vlm.Load(), obs.Load())
 	}
-	s := e.Snapshot()
-	if s.Camera.Caption == "" || s.Screen.Caption == "" {
-		t.Fatalf("expected both captions, got %+v vlm=%d obs=%d", s, vlm.Load(), obsN.Load())
+	if g := e.Glance(context.Background(), SourceScreen); !strings.Contains(g.Caption, "Cursor") {
+		t.Fatalf("screen %q", g.Caption)
 	}
-	if !strings.Contains(s.Camera.Caption, "摄像头") {
-		t.Fatalf("camera caption %q", s.Camera.Caption)
+	if g := e.Glance(context.Background(), SourceCamera); !strings.Contains(g.Caption, "摄像头") {
+		t.Fatalf("camera %q", g.Caption)
 	}
-	if !strings.Contains(s.Screen.Caption, "Cursor") {
-		t.Fatalf("screen should be computer-use, got %q", s.Screen.Caption)
-	}
-	if vlm.Load() != 1 {
-		t.Fatalf("vlm calls %d, want camera only", vlm.Load())
-	}
-	if obsN.Load() < 1 {
-		t.Fatal("computer-use observer never ran")
+	if vlm.Load() != 1 || obs.Load() != 1 {
+		t.Fatalf("one look each vlm=%d obs=%d", vlm.Load(), obs.Load())
 	}
 }
 
@@ -116,25 +96,40 @@ func TestPushRejectsScreenJPEG(t *testing.T) {
 func TestGateSkipsPrivate(t *testing.T) {
 	var vlm atomic.Int32
 	e := New(Options{
-		Camera:   true,
-		Interval: time.Hour,
-		Cooldown: time.Millisecond,
-		Jev:      fakeEval{noteworthy: 0.9, private: 0.95, mention: 0.9},
+		Camera: true,
+		Jev:    fakeEval{noteworthy: 0.9, private: 0.95, mention: 0.9},
 		LLM: fakeVision{fn: func(context.Context, string, string, []byte) (string, error) {
 			vlm.Add(1)
 			return "should not run", nil
 		}},
 	})
-	f, err := NormalizeFrame(SourceCamera, SolidJPEG(24, 24, color.White), 24)
-	if err != nil {
+	if err := e.pushJPEG(SourceCamera, SolidJPEG(24, 24, color.White)); err != nil {
 		t.Fatal(err)
 	}
-	e.consider(context.Background(), f)
+	g := e.Glance(context.Background(), SourceCamera)
 	if vlm.Load() != 0 {
 		t.Fatal("private frame should not call vlm")
 	}
-	if got := e.Snapshot().Camera.Caption; !strings.Contains(got, "私人") {
-		t.Fatalf("caption %q", got)
+	if !strings.Contains(g.Caption, "私人") {
+		t.Fatalf("caption %q", g.Caption)
+	}
+}
+
+func TestGlanceWaitsForOneGrab(t *testing.T) {
+	e := New(Options{
+		LLM: fakeVision{fn: func(context.Context, string, string, []byte) (string, error) {
+			return "新的一帧。", nil
+		}},
+	})
+	e.opt.Grab = func(context.Context) bool {
+		if err := e.pushJPEG(SourceCamera, SolidJPEG(16, 16, color.Gray{Y: 40})); err != nil {
+			t.Error(err)
+		}
+		return true
+	}
+	g := e.Glance(context.Background(), SourceCamera)
+	if !strings.Contains(g.Caption, "新的一帧") {
+		t.Fatalf("caption %q", g.Caption)
 	}
 }
 
@@ -177,53 +172,6 @@ func TestGlanceIsOneSource(t *testing.T) {
 	}
 	if e.Snapshot().Camera.Caption == "" {
 		t.Fatal("screen glance cleared the camera")
-	}
-}
-
-func TestPauseSkipsBackgroundModels(t *testing.T) {
-	var vlm atomic.Int32
-	var obs atomic.Int32
-	e := New(Options{
-		Camera:   true,
-		Screen:   true,
-		Interval: 20 * time.Millisecond,
-		Cooldown: time.Millisecond,
-		Jev:      fakeEval{noteworthy: 0.9, private: 0.1, mention: 0.1},
-		LLM: fakeVision{fn: func(context.Context, string, string, []byte) (string, error) {
-			vlm.Add(1)
-			return "摄像头里有人。", nil
-		}},
-		Observe: func(context.Context) (ScreenView, error) {
-			obs.Add(1)
-			return ScreenView{Caption: "前台 Cursor", Signature: "sig"}, nil
-		},
-	})
-	e.SetEnabled(false)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go e.sampleScreen(ctx)
-	go e.loop(ctx)
-	if err := e.pushJPEG(SourceCamera, SolidJPEG(32, 32, color.White)); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(120 * time.Millisecond)
-	if obs.Load() != 0 || vlm.Load() != 0 {
-		t.Fatalf("paused still called models obs=%d vlm=%d", obs.Load(), vlm.Load())
-	}
-	e.Glance(context.Background(), SourceScreen)
-	if obs.Load() != 1 {
-		t.Fatalf("one-shot glance obs=%d", obs.Load())
-	}
-	if vlm.Load() != 0 {
-		t.Fatal("screen glance must not call the camera model")
-	}
-	e.SetEnabled(true)
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && (obs.Load() < 2 || vlm.Load() == 0) {
-		time.Sleep(15 * time.Millisecond)
-	}
-	if obs.Load() < 2 || vlm.Load() == 0 {
-		t.Fatalf("resume obs=%d vlm=%d", obs.Load(), vlm.Load())
 	}
 }
 

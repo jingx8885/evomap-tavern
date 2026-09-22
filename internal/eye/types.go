@@ -57,17 +57,16 @@ type Sight struct {
 	Mention bool    `json:"mention,omitempty"`
 }
 
-// Options configure the parallel eyes.
+// Options configure on-demand eyes. Nothing here starts a clock.
 type Options struct {
-	Camera   bool
-	Screen   bool
-	Interval time.Duration
-	Cooldown time.Duration
-	Observe  func(ctx context.Context) (ScreenView, error) // computer-use glance; tests inject
-	Jev      Evaluator
-	LLM      Visioner
-	LogFn    func(string)
-	OnSight  func(Sight)
+	Camera  bool
+	Screen  bool
+	Grab    func(ctx context.Context) bool                // ask for one JPEG; false means do not wait
+	Observe func(ctx context.Context) (ScreenView, error) // computer-use glance; tests inject
+	Jev     Evaluator
+	LLM     Visioner
+	LogFn   func(string)
+	OnSight func(Sight)
 }
 
 // ScreenView is what computer-use observation reports. No JPEG.

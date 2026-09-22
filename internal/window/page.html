@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>stage</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --ground: #100e0c;
+    --desk: #1b1714;
+    --ink: #f3ece4;
+    --muted: #c8b8a4;
+    --accent: #e0b15a;
+    --card: #221c18;
+    --line: #3a332c;
+    --radius: 12px;
+    --font: "Segoe UI", sans-serif;
+  }
+  html, body { margin: 0; height: 100%; background: var(--ground); color: var(--ink); font: 15px/1.4 var(--font); }
+  body.frame-plain #frame { border-color: transparent; }
+  body.frame-glow #frame { box-shadow: 0 0 24px var(--accent); }
+  #desk { min-height: 100%; display: flex; flex-direction: column; padding: 16px; box-sizing: border-box; }
+  #bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+  #bar strong { font-weight: 600; letter-spacing: 0.04em; }
+  .chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; color: var(--muted); }
+  #controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  #controls:empty { display: none; }
+  .ctl.label { font-weight: 600; width: 100%; }
+  .ctl.note { color: var(--muted); width: 100%; }
+  .ctl.chip { border: 1px solid var(--accent); color: var(--accent); border-radius: 999px; padding: 2px 10px; }
+  .ctl.rule { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+  .ctl.meter { width: 100%; }
+  .ctl.meter i { display: block; height: 6px; margin-top: 4px; background: var(--accent); border-radius: 99px; }
+  #frame { flex: 1; background: var(--desk); border: 1px solid var(--line); border-radius: var(--radius); min-height: 280px; overflow: hidden; }
+  #frame.covered { display: grid; place-items: center; color: var(--muted); }
+  .split { display: grid; grid-template-columns: 280px 1fr; height: 100%; }
+  .queue { display: flex; }
+  .stage { display: block; }
+  .column { overflow: auto; border-right: 1px solid var(--line); padding: 10px; }
+  .stage-only .column { display: none; }
+  .queue-only .feature { display: none; }
+  .queue-only .column { border-right: 0; width: 100%; }
+  .card { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; margin-bottom: 8px; background: var(--card); }
+  .card.on { border-color: var(--accent); }
+  .kind { color: var(--accent); font-size: 12px; text-transform: uppercase; }
+  .status { float: right; color: var(--muted); font-size: 12px; }
+  .prompt { margin: 6px 0; }
+  .bar { height: 6px; background: var(--line); border-radius: 99px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); }
+  .ready .bar > i { background: #8fbf7a; }
+  .failed .bar > i { background: #d16a6a; }
+  .feature { padding: 16px; overflow: auto; }
+  .feature img, .feature video { max-width: 100%; max-height: 70vh; border-radius: 8px; background: var(--ground); }
+  .note { white-space: pre-wrap; }
+  .look { color: var(--muted); margin-top: 8px; }
+</style>
+</head>
+<body>
+  <div id="desk">
+    <header id="bar"><strong id="title">stage</strong><span class="chip" id="layout">split</span></header>
+    <div id="controls"></div>
+    <div id="frame"></div>
+  </div>
+  <script>
+    function esc(s) {
+      return String(s || "").replace(/[&<>"]/g, function (c) {
+        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+      });
+    }
+    function card(job, on) {
+      var ratio = Math.max(0, Math.min(1, job.ratio || 0));
+      return '<article class="card ' + esc(job.status) + (on ? " on" : "") + '">' +
+        '<div class="kind">' + esc(job.kind) + '<span class="status">' + esc(job.status) + "</span></div>" +
+        '<div class="prompt">' + esc(job.prompt) + "</div>" +
+        '<div class="bar"><i style="width:' + Math.round(ratio * 100) + '%"></i></div>' +
+        "</article>";
+    }
+    function feature(job) {
+      if (!job) return '<p class="look">空的右框。</p>';
+      var body = "";
+      if (job.file && job.kind === "image") body = '<img alt="" src="/media/' + encodeURIComponent(job.file) + '">';
+      else if (job.file && job.kind === "video") body = '<video controls src="/media/' + encodeURIComponent(job.file) + '"></video>';
+      else if (job.file && (job.kind === "speech" || job.kind === "song")) body = '<audio controls src="/media/' + encodeURIComponent(job.file) + '"></audio>';
+      else if (job.text) body = '<p class="note">' + esc(job.text) + "</p>";
+      else body = '<p class="prompt">' + esc(job.prompt) + "</p>" + card(job, true);
+      if (job.look) body += '<p class="look">' + esc(job.look) + "</p>";
+      return body;
+    }
+    function applyTheme(theme) {
+      if (!theme) return;
+      var root = document.documentElement;
+      var map = {
+        background: "--ground", desk: "--desk", ink: "--ink", muted: "--muted",
+        accent: "--accent", card: "--card", line: "--line"
+      };
+      Object.keys(map).forEach(function (key) {
+        if (theme[key]) root.style.setProperty(map[key], theme[key]);
+      });
+      var radius = { tight: "6px", soft: "12px", round: "22px" }[theme.radius] || "12px";
+      root.style.setProperty("--radius", radius);
+      var font = {
+        sans: '"Segoe UI", sans-serif',
+        serif: 'Georgia, serif',
+        mono: '"Cascadia Mono", ui-monospace, monospace'
+      }[theme.font] || '"Segoe UI", sans-serif';
+      root.style.setProperty("--font", font);
+      document.body.classList.toggle("frame-plain", theme.frame === "plain");
+      document.body.classList.toggle("frame-glow", theme.frame === "glow");
+    }
+    function controlsHTML(list) {
+      return (list || []).map(function (c) {
+        if (c.kind === "rule") return '<hr class="ctl rule">';
+        if (c.kind === "meter") {
+          var w = Math.round(Math.max(0, Math.min(1, c.value || 0)) * 100);
+          return '<div class="ctl meter"><span>' + esc(c.text) + '</span><i style="width:' + w + '%"></i></div>';
+        }
+        return '<div class="ctl ' + esc(c.kind) + '">' + esc(c.text) + "</div>";
+      }).join("");
+    }
+    function paint(doc) {
+      var frame = document.getElementById("frame");
+      var view = doc.view || {};
+      applyTheme(view.theme);
+      document.getElementById("title").textContent = doc.title || "stage";
+      document.getElementById("layout").textContent = view.layout || "split";
+      document.getElementById("controls").innerHTML = doc.open ? controlsHTML(view.controls) : "";
+      if (!doc.open) {
+        frame.className = "covered";
+        frame.textContent = "窗口合上了";
+        return;
+      }
+      var jobs = view.jobs || [];
+      var featureID = view.feature || "";
+      var featured = null;
+      var cards = "";
+      jobs.forEach(function (job) {
+        var on = job.id === featureID;
+        if (on) featured = job;
+        cards += card(job, on);
+      });
+      if (!featured && jobs.length) featured = jobs[0];
+      var layout = view.layout || "split";
+      var cls = layout === "queue" ? "queue-only" : layout === "stage" ? "stage-only" : "split";
+      frame.className = cls;
+      frame.innerHTML = '<div class="' + cls + '"><div class="column">' + cards + '</div><div class="feature">' + feature(featured) + "</div></div>";
+    }
+    function tick() {
+      fetch("/api/desktop").then(function (r) { return r.json(); }).then(paint).catch(function () {});
+    }
+    tick();
+    setInterval(tick, 1000);
+  </script>
+</body>
+</html>

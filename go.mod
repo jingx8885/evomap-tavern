@@ -10,6 +10,9 @@ require (
 )
 
 require (
+	github.com/6tail/lunar-go v1.4.6 // indirect
+	github.com/godcong/chronos/v2 v2.0.8 // indirect
+	github.com/godcong/yi v1.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/pion/datachannel v1.6.2 // indirect
 	github.com/pion/dtls/v3 v3.1.8 // indirect
