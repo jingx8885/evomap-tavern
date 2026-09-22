@@ -870,7 +870,7 @@ func (s *Session) Speaking() bool {
 }
 
 // SetNote receives lines the session wants on the agent log,
-// such as a held steer that is delivered after the line.
+// such as a commentary nudge delivered after the line.
 func (s *Session) SetNote(fn func(string)) {
 	s.noteMu.Lock()
 	s.noteFn = fn

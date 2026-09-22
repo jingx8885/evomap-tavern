@@ -142,6 +142,12 @@ func TestReadBodyAndFelt(t *testing.T) {
 	if !strings.Contains(look, "package agent") {
 		t.Fatalf("look missing excerpt: %q", look)
 	}
+	if !Writable("personas/haru.yaml") || !Writable("internal/sense/felt.go") {
+		t.Fatal("persona and sense should be writable")
+	}
+	if Writable("internal/judge/judge.go") || Writable("internal/agent/agent.go") || Writable("internal/desk/loop.go") || Writable("internal/livevoice/session.go") {
+		t.Fatal("safety latches must stay read-only")
+	}
 	b.Set(func(l *Live) { l.Camera = "对面有个人"; l.Screen = "在写代码" })
 	camAsk := b.Felt(p, Ask{Kind: AskCamera}, "")
 	if !strings.Contains(camAsk, "对面有个人") || strings.Contains(camAsk, "在写代码") {

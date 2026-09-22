@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-const maxDirty = 80
+const maxDirty = 200
 
 // treeSnap is the dirty working tree before a change, so a step that
 // touches anything except the chosen file can be put back.

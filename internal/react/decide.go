@@ -56,7 +56,8 @@ func choices(bus *sense.Bus, goal string) []choice {
 	}
 	seen := map[string]bool{}
 	var out []choice
-	add := func(rel, feel string) {
+	var add func(rel, feel string)
+	add = func(rel, feel string) {
 		rel = strings.TrimSpace(rel)
 		if rel == "" || seen[rel] || len(out) >= maxPath {
 			return
@@ -171,13 +172,13 @@ func stateOf(opt Options, paths []choice, history []Step) map[string]any {
 		hist = append(hist, map[string]string{"step": s.Step, "path": s.Path, "note": clip(s.Note, 160)})
 	}
 	return map[string]any{
-		"branch":    opt.Kind,
-		"goal":      clip(opt.Goal, 400),
-		"last_note": clip(opt.LastNote, 400),
+		"branch":     opt.Kind,
+		"goal":       clip(opt.Goal, 400),
+		"last_note":  clip(opt.LastNote, 400),
 		"can_change": opt.CanChange,
-		"mode":      opt.Mode,
-		"paths":     listed,
-		"history":   hist,
+		"mode":       opt.Mode,
+		"paths":      listed,
+		"history":    hist,
 		"note": "She is noticing and, only if asked, changing herself. " +
 			"A change edits one writable file on disk. The running process stays the previous build.",
 	}

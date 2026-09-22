@@ -919,7 +919,7 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 				if err := sess.Steer(livevoice.FitTail(felt)); err != nil && !errors.Is(err, livevoice.ErrHeld) {
 					opt.log("[steer] observe failed: %v", err)
 				} else if errors.Is(err, livevoice.ErrHeld) {
-					opt.log("[steer] observe held")
+					opt.log("[steer] observe skipped")
 				}
 			}
 		}

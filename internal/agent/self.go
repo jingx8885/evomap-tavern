@@ -7,8 +7,8 @@ import (
 	"github.com/jingx8885/lov-evo/internal/desk"
 	"github.com/jingx8885/lov-evo/internal/jev"
 	"github.com/jingx8885/lov-evo/internal/judge"
-	"github.com/jingx8885/lov-evo/internal/llm"
 	"github.com/jingx8885/lov-evo/internal/livevoice"
+	"github.com/jingx8885/lov-evo/internal/llm"
 	"github.com/jingx8885/lov-evo/internal/persona"
 	"github.com/jingx8885/lov-evo/internal/react"
 	"github.com/jingx8885/lov-evo/internal/sense"
@@ -101,7 +101,7 @@ func ensureSelf(ctx context.Context, opt Options, p *persona.Persona, jc *jev.Cl
 			voiceNudge(opt, sess, "You could not do that to yourself. Say so simply. Do not invent a change.")
 			return
 		}
-		if rep == nil {
+		if rep == nil || len(rep.Steps) == 0 {
 			return
 		}
 		slot.setNote(clip(rep.Note, 200))
