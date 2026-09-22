@@ -79,6 +79,33 @@ func TestParseTextJSON(t *testing.T) {
 	}
 }
 
+func TestParseDecisionReadsOneTarget(t *testing.T) {
+	d := parseDecision(map[string]jev.Answer{
+		"operation": {Choice: OpLaunchApp},
+		"target":    {Choice: "app:notepad"},
+	})
+	if d.App != "notepad" || d.Hotkey != "" || d.WindowID != "" {
+		t.Fatalf("%+v", d)
+	}
+	d = parseDecision(map[string]jev.Answer{
+		"operation": {Choice: OpFocusWindow},
+		"target":    {Choice: "win:w1"},
+	})
+	if d.WindowID != "w1" {
+		t.Fatalf("%+v", d)
+	}
+	qs := questions(Snapshot{Windows: []Window{{ID: "w1", Process: "notepad", Title: "notes"}}})
+	if _, ok := qs["app_target"]; ok || qs["hotkey_target"].Type != "" || qs["window_target"].Type != "" {
+		t.Fatal("app, hotkey, and window must be one target question")
+	}
+	if _, ok := qs["target"].Criteria["app:notepad"]; !ok {
+		t.Fatal("missing app target")
+	}
+	if _, ok := qs["target"].Criteria["win:w1"]; !ok {
+		t.Fatal("missing window target")
+	}
+}
+
 func TestParseDecisionIgnoresSentinels(t *testing.T) {
 	d := parseDecision(map[string]jev.Answer{
 		"operation":     {Choice: OpCodexDev, Confidence: f64(0.9)},

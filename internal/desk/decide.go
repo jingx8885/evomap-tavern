@@ -95,43 +95,48 @@ func questions(snap Snapshot) map[string]jev.Question {
 			Instructions: "Is there visible evidence in the current state and history that the user's " +
 				"entire goal is already satisfied?",
 		},
-		"app_target": {
-			Type:         "choice",
-			Instructions: "If the next operation is launch_app, which allowlisted app?",
-			Criteria: map[string]any{
-				"cursor":     "Cursor IDE",
-				"explorer":   "Windows Explorer",
-				"notepad":    "Notepad",
-				"powershell": "PowerShell",
-				"terminal":   "Windows Terminal",
-				"chrome":     "Chrome or Edge",
-				"not_launch": "Not a launch_app step",
-			},
-		},
-		"hotkey_target": {
-			Type:         "choice",
-			Instructions: "If the next operation is hotkey, which known shortcut?",
-			Criteria: map[string]any{
-				"ctrl_l":     "Cursor Chat (Ctrl+L)",
-				"ctrl_i":     "Cursor inline/composer (Ctrl+I)",
-				"ctrl_s":     "Save (Ctrl+S)",
-				"ctrl_enter": "Submit (Ctrl+Enter)",
-				"enter":      "Enter",
-				"escape":     "Escape",
-				"alt_tab":    "Alt+Tab",
-				"not_hotkey": "Not a hotkey step",
-			},
-		},
-	}
-	if wins := windowCriteria(snap); len(wins) > 0 {
-		qs["window_target"] = jev.Question{
-			Type: "choice",
-			Instructions: "If the next operation is focus_window, which observed window? " +
-				"Choose only an offered id.",
-			Criteria: wins,
-		}
+		"target": targetQuestion(snap),
 	}
 	return qs
+}
+
+func targetQuestion(snap Snapshot) jev.Question {
+	crit := map[string]any{
+		"none": "This step needs no app, hotkey, or window.",
+	}
+	for id, label := range map[string]string{
+		"cursor":     "Cursor IDE",
+		"explorer":   "Windows Explorer",
+		"notepad":    "Notepad",
+		"powershell": "PowerShell",
+		"terminal":   "Windows Terminal",
+		"chrome":     "Chrome or Edge",
+	} {
+		crit["app:"+id] = "Launch " + label
+	}
+	for id, label := range map[string]string{
+		"ctrl_l":     "Cursor Chat (Ctrl+L)",
+		"ctrl_i":     "Cursor inline/composer (Ctrl+I)",
+		"ctrl_s":     "Save (Ctrl+S)",
+		"ctrl_enter": "Submit (Ctrl+Enter)",
+		"enter":      "Enter",
+		"escape":     "Escape",
+		"alt_tab":    "Alt+Tab",
+	} {
+		crit["key:"+id] = label
+	}
+	for id, label := range windowCriteria(snap) {
+		if id == "not_focus" {
+			continue
+		}
+		crit["win:"+id] = label
+	}
+	return jev.Question{
+		Type: "choice",
+		Instructions: "If the operation is launch_app, hotkey, or focus_window, pick that target. " +
+			"Otherwise none. Do not invent an id.",
+		Criteria: crit,
+	}
 }
 
 func windowCriteria(snap Snapshot) map[string]any {
@@ -155,6 +160,9 @@ func parseDecision(ans map[string]jev.Answer) Decision {
 		d.Op = a.Choice
 		d.Confidence = noulOrConf(a)
 	}
+	if a, ok := ans["target"]; ok {
+		applyTarget(&d, a.Choice)
+	}
 	if a, ok := ans["window_target"]; ok && !ignoreChoice(a.Choice, "not_focus") {
 		d.WindowID = a.Choice
 	}
@@ -174,6 +182,20 @@ func parseDecision(ans map[string]jev.Answer) Decision {
 		d.Confidence = minConf(ans)
 	}
 	return d
+}
+
+func applyTarget(d *Decision, choice string) {
+	choice = strings.TrimSpace(choice)
+	switch {
+	case choice == "" || choice == "none":
+		return
+	case strings.HasPrefix(choice, "app:"):
+		d.App = strings.TrimPrefix(choice, "app:")
+	case strings.HasPrefix(choice, "key:"):
+		d.Hotkey = strings.TrimPrefix(choice, "key:")
+	case strings.HasPrefix(choice, "win:"):
+		d.WindowID = strings.TrimPrefix(choice, "win:")
+	}
 }
 
 func ignoreChoice(choice, skip string) bool {

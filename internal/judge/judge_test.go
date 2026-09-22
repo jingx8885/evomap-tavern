@@ -61,6 +61,28 @@ func TestParse(t *testing.T) {
 	}
 }
 
+func TestDerivedFeelingsAndLook(t *testing.T) {
+	j := Parse("嗯", map[string]jev.Answer{
+		"emotion": {Choice: "sadness"},
+		"intent":  {Choice: "withdraw"},
+	})
+	if j.Valence < 0.2 || j.Valence > 0.35 {
+		t.Fatalf("valence should follow sadness, got %v", j.Valence)
+	}
+	if j.Engagement >= 0.3 {
+		t.Fatalf("withdraw should be low engagement, got %v", j.Engagement)
+	}
+	j = Parse("看摄像头", map[string]jev.Answer{"act": {Choice: ActCamera}})
+	if j.Attend != "camera" {
+		t.Fatalf("camera act should show the camera, got %q", j.Attend)
+	}
+	j = Parse("有几个人", map[string]jev.Answer{"act": {Choice: ActNone}})
+	j.BindLook(ActCamera)
+	if j.Attend != "camera" {
+		t.Fatalf("open camera branch should stay on camera, got %q", j.Attend)
+	}
+}
+
 func TestCapability(t *testing.T) {
 	low := 0.1
 	j := Parse("hi", map[string]jev.Answer{"need_llm": {Noul: f(0.2)}})
@@ -233,18 +255,18 @@ func TestJudgeTurnAgainstFakeServer(t *testing.T) {
 	if jd.Act != ActNone || jd.Capability(0.55) != ActNone {
 		t.Fatalf("act %+v", jd)
 	}
-	for _, q := range []string{"need_llm", "keep", "intent", "self_emotion", "mode", "attend", "act"} {
+	for _, q := range []string{"emotion", "arousal", "self_emotion", "intent", "keep", "act", "safety", "persona_fit"} {
 		if _, ok := gotQuestions[q]; !ok {
 			t.Fatalf("turn judge must ask %s, got %v", q, gotQuestions)
 		}
 	}
-	modeQ, _ := gotQuestions["mode"].(map[string]any)
-	crit, _ := modeQ["criteria"].(map[string]any)
-	if _, ok := crit["goal_push"]; ok {
-		t.Fatalf("empty plan must omit goal_push: %v", crit)
+	for _, q := range []string{"valence", "engagement", "mode", "need_llm", "attend", "window", "win_op", "win_target"} {
+		if _, ok := gotQuestions[q]; ok {
+			t.Fatalf("merged question %s should not be asked", q)
+		}
 	}
-	if s, _ := crit["comfort"].(string); !strings.Contains(s, "先嫌一句") {
-		t.Fatalf("mode criteria should carry persona reaction, got %v", crit["comfort"])
+	if len(gotQuestions) != 8 {
+		t.Fatalf("ordinary turn should ask 8 questions, got %d: %v", len(gotQuestions), gotQuestions)
 	}
 	actQ, _ := gotQuestions["act"].(map[string]any)
 	actCrit, _ := actQ["criteria"].(map[string]any)
@@ -337,21 +359,26 @@ func TestWindowQuestionsStayClosed(t *testing.T) {
 	view := WindowView{
 		Modules: []WindowMod{{ID: "stage", Title: "stage", Open: true}},
 		Ops: map[string]string{
-			"none": "leave", "open": "show", "layout_split": "split",
+			"none": "leave", "open": "show", "layout_split": "split", "feature": "feature a job",
 		},
 		Targets: map[string]string{"none": "leave", "j1": "image ready"},
 	}
 	qs := questions(p, false, "", Branch{}, view)
-	if _, ok := qs["window"]; !ok {
-		t.Fatal("registered module must ask window")
+	page, ok := qs["page"]
+	if !ok {
+		t.Fatal("registered module must ask one page question")
 	}
-	if _, ok := qs["win_op"]; !ok {
-		t.Fatal("registered module must ask win_op")
+	if _, ok := qs["window"]; ok || qs["win_op"].Type != "" || qs["win_target"].Type != "" {
+		t.Fatal("page ops must not be three questions")
+	}
+	if _, ok := page.Criteria["stage:layout_split"]; !ok {
+		t.Fatalf("page criteria %v", page.Criteria)
+	}
+	if _, ok := page.Criteria["stage:feature:j1"]; !ok {
+		t.Fatalf("feature target missing: %v", page.Criteria)
 	}
 	jd := Parse("打开", map[string]jev.Answer{
-		"window":     {Choice: "stage"},
-		"win_op":     {Choice: "layout_split"},
-		"win_target": {Choice: "nope"},
+		"page": {Choice: "stage:layout_split"},
 	})
 	takeWindow(&jd, view)
 	if jd.Window != "stage" || jd.WinOp != "layout_split" {
@@ -360,7 +387,7 @@ func TestWindowQuestionsStayClosed(t *testing.T) {
 	if jd.WinTarget != "" {
 		t.Fatalf("unknown target kept: %q", jd.WinTarget)
 	}
-	bad := Parse("打开", map[string]jev.Answer{"win_op": {Choice: "click"}})
+	bad := Parse("打开", map[string]jev.Answer{"page": {Choice: "stage:click"}})
 	takeWindow(&bad, view)
 	if bad.WinOp != "" {
 		t.Fatalf("unknown op kept: %q", bad.WinOp)

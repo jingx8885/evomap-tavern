@@ -1,8 +1,9 @@
-// Package judge turns each conversation turn into typed Jev judgments:
-// user affect, intent, the persona's own feeling, steering mode, fit,
-// and which capability to start. Everything is asked in ONE /v1/systemone
-// request. That request is the only entry for tools. Go applies the safety
-// latch, drops unknown choices, and falls back if Jev omits a mode.
+// Package judge turns each conversation turn into typed Jev judgments.
+// One /v1/systemone call asks the few questions that are not the same fact:
+// how they feel, how stirred up they are, how she feels, what they are
+// doing, whether to keep it, and which single tool to start. Valence,
+// engagement, steering mode, and which eye to show are filled in by code.
+// Go applies the safety latch and drops unknown choices.
 package judge
 
 import (
@@ -36,19 +37,8 @@ var IntentLabels = map[string]string{
 	"share_bad":    "Sharing something hard, without necessarily asking for help.",
 	"request":      "Wants information, a plan, or a concrete favor.",
 	"goodbye":      "Leaving or wrapping up.",
+	"withdraw":     "Pulling away: a very short reply, trailing off, not saying goodbye.",
 	"other":        "None of the above.",
-}
-
-// DefaultModeCriteria describe steering modes for Jev when the persona
-// YAML has no reactions. Always: pick THIS persona's way, not a therapist.
-var DefaultModeCriteria = map[string]string{
-	"safety":      "Distress or self-harm. Slow down, stay careful, still in persona.",
-	"comfort":     "User is sad, scared, or hurting. Care the way THIS persona would — not a generic therapist.",
-	"de_escalate": "User is angry or frustrated. Lower energy, don't fight, stay in persona.",
-	"celebrate":   "User is genuinely happy or sharing a win. Share it in persona, not fake pep.",
-	"re_engage":   "User is pulling away but not saying goodbye. One specific follow-up, no greeting.",
-	"goal_push":   "The conversation can take a light nudge toward the long-term goal without ignoring mood.",
-	"continue":    "Keep going from what they just said. Default when nothing else fits.",
 }
 
 // DefaultNeedLLM is the noul cutoff for launching the planner LLM.
@@ -183,21 +173,6 @@ func criteriaCopy(src map[string]string) map[string]any {
 	return m
 }
 
-func modeCriteria(p *persona.Persona, planNote string) map[string]any {
-	m := map[string]any{}
-	for mode, def := range DefaultModeCriteria {
-		if mode == "goal_push" && strings.TrimSpace(planNote) == "" {
-			continue
-		}
-		if r := p.Reaction(mode); r != "" {
-			m[mode] = r + " (" + def + ")"
-			continue
-		}
-		m[mode] = def
-	}
-	return m
-}
-
 // AttendLabels is which observation, if any, the voice model may see this turn.
 var AttendLabels = map[string]string{
 	"none":   "Nothing extra. Ordinary chat. Do not show the camera, the screen, or the log.",
@@ -245,69 +220,34 @@ var knownAct = map[string]bool{
 
 // questions builds the one-shot Jev question set for a turn.
 func questions(p *persona.Persona, withPersonaFit bool, planNote string, br Branch, win WindowView) map[string]jev.Question {
+	_ = planNote
 	qs := map[string]jev.Question{
-		"valence": {
-			Type: "score",
-			Instructions: "Rate the emotional valence expressed by the user in " +
-				"section latest of state: how positive vs negative they feel. " +
-				"Use the ordered levels.",
-			Levels: scoreLevels(),
-		},
-		"arousal": {
-			Type: "score",
-			Instructions: "Rate the emotional arousal/energy of the user in " +
-				"section latest: calm and flat at the low end, agitated " +
-				"or excited at the high end.",
-			Levels: scoreLevels(),
-		},
 		"emotion": {
 			Type: "choice",
 			Instructions: "Which single emotion best describes the user in " +
-				"section latest?",
+				"section latest? This is their feeling, not the persona's.",
+			Criteria: criteriaCopy(EmotionLabels),
+		},
+		"arousal": {
+			Type: "score",
+			Instructions: "How stirred up is the user in section latest? " +
+				"Calm and flat at the low end, agitated or excited at the high end.",
+			Levels: scoreLevels(),
+		},
+		"self_emotion": {
+			Type: "choice",
+			Instructions: "Which single emotion would the persona in state.persona " +
+				"feel in response, given their style? " +
+				"This is her feeling, not a copy of the user's emotion.",
 			Criteria: criteriaCopy(EmotionLabels),
 		},
 		"intent": {
 			Type: "choice",
 			Instructions: "What is the user doing in section latest? " +
 				"Judge the conversational move, not the emotion. " +
-				"Playful complaining or tsundere sparring is banter, not comfort_seek.",
+				"Playful complaining or tsundere sparring is banter, not comfort_seek. " +
+				"A very short reply that trails off, without saying goodbye, is withdraw.",
 			Criteria: criteriaCopy(IntentLabels),
-		},
-		"self_emotion": {
-			Type: "choice",
-			Instructions: "Which single emotion would the persona in state.persona " +
-				"feel in response to section latest, given their style and reactions? " +
-				"This is the assistant's own feeling, not the user's.",
-			Criteria: criteriaCopy(EmotionLabels),
-		},
-		"engagement": {
-			Type: "score",
-			Instructions: "How engaged is the user in section latest - " +
-				"are they actively participating or pulling away (short " +
-				"replies, topic drops, goodbye signals)?",
-			Levels: scoreLevels(),
-		},
-		"mode": {
-			Type: "choice",
-			Instructions: "Which steering mode should this persona use this turn? " +
-				"Pick from the persona's own way of handling the user's latest " +
-				"utterance — not a generic therapist, customer-service, or pep-talk " +
-				"script. Use state.persona.reactions when present. " +
-				"Banter stays continue, not comfort or de_escalate. " +
-				"Goodbye stays continue, not re_engage. " +
-				"Pick goal_push only if state.plan is non-empty and a nudge fits. " +
-				"If the last assistant reply drifted off persona, still pick the " +
-				"mode for the USER's need; the runtime will snap the voice back.",
-			Criteria: modeCriteria(p, planNote),
-		},
-		"need_llm": {
-			Type: "noul",
-			Instructions: "Should a slower LLM planner run after this turn? " +
-				"Yes if the user asked for a plan, a decision, a joke/story " +
-				"that needs invention, a stuck conversation that needs a new " +
-				"direction, or anything the live voice model cannot do well " +
-				"alone. No for greetings, backchannels (嗯/哦/好/喂), small " +
-				"talk, or a reply the voice model can continue immediately.",
 		},
 		"keep": {
 			Type: "noul",
@@ -318,20 +258,6 @@ func questions(p *persona.Persona, withPersonaFit bool, planNote string, br Bran
 				"revises or finishes something in state.remembered. " +
 				"No for greetings, backchannels (嗯/哦/好/喂), and lines that " +
 				"only repeat what state.remembered already says.",
-		},
-		"attend": {
-			Type: "choice",
-			Instructions: "Which observation should the voice model see this turn? " +
-				"Read state.observe and section latest. " +
-				"Pick none for ordinary chat. " +
-				"Pick camera, screen, or eyes only when they asked what she sees, " +
-				"or the note is clearly what the utterance is about. " +
-				"Pick stage when they asked what her stage window looks like. " +
-				"Pick log only when they asked about her log, an error, or a fault. " +
-				"Pick all only when both the scene and the log matter. " +
-				"Empty observe fields are not a reason to pick that channel. " +
-				"Do not pick a channel just because a caption exists.",
-			Criteria: criteriaCopy(AttendLabels),
 		},
 		"act": {
 			Type: "choice",
@@ -394,43 +320,49 @@ func questions(p *persona.Persona, withPersonaFit bool, planNote string, br Bran
 		}
 	}
 	if win.Live() {
-		mods := map[string]string{"none": "Do not touch a page."}
-		for _, m := range win.Modules {
-			mods[m.ID] = m.Title + ". Her own page module, not a desktop window."
-		}
-		qs["window"] = jev.Question{
-			Type: "choice",
-			Instructions: "Which of her own page modules should win_op apply to? " +
-				"Read state.window. These are her pages, not the computer's other windows. " +
-				"Pick none to leave them alone.",
-			Criteria: criteriaCopy(mods),
-		}
-		qs["win_op"] = jev.Question{
-			Type: "choice",
-			Instructions: "What should the runtime do to that page module? " +
-				"Pick none to leave it. open and focus show it. hide and close cover it. " +
-				"Layout and feature ops belong to the module that declared them. " +
-				"Do not invent an op that is not listed.",
-			Criteria: criteriaAny(win.Ops),
-		}
-		if len(win.Targets) > 0 {
-			qs["win_target"] = jev.Question{
-				Type: "choice",
-				Instructions: "Which job should feature or cancel use? " +
-					"Pick none to leave the featured job. Pick latest for the newest. " +
-					"Ids come from state.window.targets. Do not invent an id.",
-				Criteria: criteriaAny(win.Targets),
-			}
-		}
+		qs["page"] = pageQuestion(win)
 	}
 	return qs
 }
 
-func criteriaAny(src map[string]string) map[string]any {
-	if len(src) == 0 {
-		return map[string]any{"none": "Leave it."}
+// pageQuestion is one choice for her own page: which module, what to do,
+// and which job, packed as module:op or module:op:target.
+func pageQuestion(win WindowView) jev.Question {
+	crit := map[string]any{
+		"none": "Leave her pages alone.",
 	}
-	return criteriaCopy(src)
+	for _, m := range win.Modules {
+		for op, label := range win.Ops {
+			if op == "" || op == "none" || op == "feature" || op == "cancel" {
+				continue
+			}
+			crit[m.ID+":"+op] = m.Title + ": " + label
+		}
+		if _, ok := win.Ops["feature"]; ok {
+			for id, label := range win.Targets {
+				if id == "" || id == "none" {
+					continue
+				}
+				crit[m.ID+":feature:"+id] = m.Title + " feature " + label
+			}
+		}
+		if _, ok := win.Ops["cancel"]; ok {
+			for id, label := range win.Targets {
+				if id == "" || id == "none" {
+					continue
+				}
+				crit[m.ID+":cancel:"+id] = m.Title + " cancel " + label
+			}
+		}
+	}
+	return jev.Question{
+		Type: "choice",
+		Instructions: "What should happen to her own page? " +
+			"Read state.window. These are her pages, not the computer's other windows. " +
+			"Pick none to leave them. A value is module:op, or module:feature:job, or module:cancel:job. " +
+			"Do not invent a module, an op, or a job id.",
+		Criteria: crit,
+	}
 }
 
 func scoreNorm(a jev.Answer) float64 {
@@ -522,8 +454,82 @@ func Parse(userText string, ans map[string]jev.Answer) Judgment {
 	if a, ok := ans["branch_done"]; ok {
 		j.BranchDoneP = noulVal(a)
 	}
+	fillDerived(&j, ans)
 	j.Confidence = confidenceOf(ans)
 	return j
+}
+
+// fillDerived supplies the facts that used to be their own questions.
+// An explicit answer still wins.
+func fillDerived(j *Judgment, ans map[string]jev.Answer) {
+	if j == nil {
+		return
+	}
+	if _, ok := ans["valence"]; !ok {
+		j.Valence = valenceFromEmotion(j.Emotion)
+	}
+	if _, ok := ans["engagement"]; !ok {
+		j.Engagement = engagementFromIntent(j.Intent)
+	}
+	if _, ok := ans["need_llm"]; !ok && j.Act == ActPlan {
+		j.NeedLLMP = 1
+	}
+	if _, ok := ans["attend"]; !ok {
+		switch j.Act {
+		case ActCamera:
+			j.Attend = "camera"
+		case ActScreen:
+			j.Attend = "screen"
+		}
+	}
+}
+
+func valenceFromEmotion(emotion string) float64 {
+	switch emotion {
+	case "joy":
+		return 0.85
+	case "surprise":
+		return 0.65
+	case "fear":
+		return 0.35
+	case "disgust":
+		return 0.32
+	case "sadness":
+		return 0.28
+	case "anger":
+		return 0.22
+	default:
+		return 0.55
+	}
+}
+
+func engagementFromIntent(intent string) float64 {
+	switch intent {
+	case "withdraw":
+		return 0.15
+	case "goodbye":
+		return 0.5
+	default:
+		return 0.75
+	}
+}
+
+// BindLook shows the camera or the screen while that look is the open
+// branch, including a follow-up whose act is none.
+func (j *Judgment) BindLook(branchKind string) {
+	if j == nil || (j.Attend != "" && j.Attend != "none") {
+		return
+	}
+	kind := j.Act
+	if kind == "" || kind == ActNone {
+		kind = branchKind
+	}
+	switch kind {
+	case ActCamera:
+		j.Attend = "camera"
+	case ActScreen:
+		j.Attend = "screen"
+	}
 }
 
 func (v WindowView) allowModule(id string) bool {
@@ -559,6 +565,16 @@ func takeWindow(j *Judgment, v WindowView) {
 	if j == nil || !v.Live() || j.Raw == nil {
 		return
 	}
+	if a, ok := j.Raw["page"]; ok {
+		mod, op, target, ok := parsePage(a.Choice)
+		if ok && (mod == "none" || v.allowModule(mod)) && (op == "" || op == "none" || v.allowOp(op)) {
+			if target == "" || v.allowTarget(target) {
+				j.Window = mod
+				j.WinOp = op
+				j.WinTarget = target
+			}
+		}
+	}
 	if a, ok := j.Raw["window"]; ok && v.allowModule(a.Choice) {
 		j.Window = a.Choice
 	}
@@ -567,6 +583,22 @@ func takeWindow(j *Judgment, v WindowView) {
 	}
 	if a, ok := j.Raw["win_target"]; ok && v.allowTarget(a.Choice) {
 		j.WinTarget = a.Choice
+	}
+}
+
+func parsePage(choice string) (module, op, target string, ok bool) {
+	choice = strings.TrimSpace(choice)
+	if choice == "" || choice == "none" {
+		return "none", "none", "", true
+	}
+	parts := strings.Split(choice, ":")
+	switch len(parts) {
+	case 2:
+		return parts[0], parts[1], "", parts[0] != "" && parts[1] != ""
+	case 3:
+		return parts[0], parts[1], parts[2], parts[0] != "" && parts[1] != "" && parts[2] != ""
+	default:
+		return "", "", "", false
 	}
 }
 
@@ -795,10 +827,9 @@ func JudgeTurn(ctx context.Context, client *jev.Client, p *persona.Persona,
 		"observe": observeState(obs),
 		"note": "latest.user is the utterance to judge when present; " +
 			"otherwise infer the user's likely state from the latest exchange. " +
-			"observe is what she could look at; attend chooses a channel, it does not rewrite it. " +
-			"act is the only tool entry. " +
+			"act is the only tool entry. plan is that act. " +
 			"If branch is present, stay on it until branch_done is yes. " +
-			"window is her own page module, not a desktop window. " +
+			"page is her own page module, not a desktop window. " +
 			"state.window.glance says what that page looks like; do not rewrite it. " +
 			"remembered is what she already keeps; keep is yes only when this turn changes that.",
 	}

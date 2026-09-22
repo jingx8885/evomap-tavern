@@ -922,6 +922,7 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 			if ask.Kind != "" {
 				opt.sense.Set(func(l *sense.Live) { l.LastAsk = ask.Kind })
 			}
+			jd.BindLook(slot.snapshot().Kind)
 			if final && opt.deskWin != nil && mode != "safety" && jd.WinOp != "" && jd.WinOp != window.OpNone {
 				if jd.WinOp == window.OpDecorate || jd.WinOp == window.OpAddControl {
 					opt.log("[window] %s %s", orDash(jd.Window), jd.WinOp)
@@ -998,12 +999,13 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 		deadline := time.Now().Add(50 * time.Second)
 		for time.Now().Before(deadline) {
 			if note, ok := pl.ConsumeNudge(before); ok {
-				if err := sess.Nudge(note); errors.Is(err, livevoice.ErrHeld) {
-					opt.log("[nudge] held")
+				quiet := "A plan note is ready. Do not bring it up on your own. Use it only if they ask what you are thinking: " + note
+				if err := sess.Steer(quiet); errors.Is(err, livevoice.ErrHeld) {
+					opt.log("[steer] skipped")
 				} else if err != nil {
-					opt.log("[nudge] failed: %v", err)
+					opt.log("[plan] steer failed: %v", err)
 				} else {
-					opt.log("[nudge] %s", note)
+					opt.log("[plan] %s", clip(note, 80))
 					opt.sense.Emit(sense.Event{Kind: sense.KindPlan, Summary: clip(note, 120)})
 				}
 				return
@@ -1204,7 +1206,7 @@ func runHands(ctx context.Context, opt Options, jc *jev.Client, lc *llm.Client, 
 	if opt.sense != nil {
 		cwd = opt.sense.Root()
 	}
-	const maxBursts = 6
+	const maxBursts = 2
 	for burst := 1; burst <= maxBursts; burst++ {
 		if ctx.Err() != nil {
 			return
@@ -1218,7 +1220,7 @@ func runHands(ctx context.Context, opt Options, jc *jev.Client, lc *llm.Client, 
 			runGoal = "Edit this repository, which is your own source. Stay inside the request. Request: " + goal
 		}
 		opt.log("[branch] %s burst %d %s", kind, burst, clip(goal, 80))
-		maxSteps := 4
+		maxSteps := 2
 		deskDriver := ""
 		var goalFn func() string
 		if codex {
@@ -1255,26 +1257,19 @@ func runHands(ctx context.Context, opt Options, jc *jev.Client, lc *llm.Client, 
 		if opt.sense != nil {
 			opt.sense.Emit(sense.Event{Kind: sense.KindDesk, Summary: kind + " " + status})
 		}
-		recent := []string(nil)
-		if mem != nil {
-			recent = mem.Recent(6)
-		}
-		p, jerr := judge.JudgeBranchDone(ctx, jc, slot.snapshot(), recent)
-		if jerr != nil {
-			opt.log("[branch] done-check skipped: %v", jerr)
-		} else if p >= judge.DefaultBranchDone {
-			opt.log("[branch] done %s (p=%.2f)", kind, p)
+		if status == desk.OpDone {
+			opt.log("[branch] done %s", kind)
 			slot.close()
-			voiceNudge(opt, sess, "The task you were on is finished. Tell them in one or two in-character sentences. Do not read logs or steps.")
+			voiceNudge(opt, sess, "The computer task finished. Mention it only if they ask. Do not read logs or steps.")
 			return
 		}
-		if status == desk.OpDone || status == desk.OpBlocked || status == "failed" || status == "canceled" {
+		if status == desk.OpBlocked || status == "failed" || status == "canceled" {
 			opt.log("[branch] %s parked (%s)", kind, status)
 			return
 		}
 	}
 	opt.log("[branch] %s parked (burst cap)", kind)
-	voiceNudge(opt, sess, "You are still on the task, but this stretch of work paused. Say that briefly, in character. Do not claim it is finished.")
+	voiceNudge(opt, sess, "This stretch of computer work paused. Mention it only if they ask. Do not claim it is finished.")
 }
 
 func ensureStudio(ctx context.Context, opt Options, lc *llm.Client, sess *livevoice.Session, slot *capabilitySlot, kind string) {
@@ -1546,15 +1541,14 @@ func voiceSteer(opt Options, sess *livevoice.Session, text string) {
 	}
 }
 
+// voiceNudge keeps a result in developer context. It does not open a turn.
+// She speaks only while answering them, not by starting a later line.
 func voiceNudge(opt Options, sess *livevoice.Session, text string) {
-	if sess == nil || strings.TrimSpace(text) == "" {
+	text = strings.TrimSpace(text)
+	if text == "" {
 		return
 	}
-	if err := sess.Nudge(text); errors.Is(err, livevoice.ErrHeld) {
-		opt.log("[nudge] held")
-	} else if err != nil {
-		opt.log("[act] nudge failed: %v", err)
-	}
+	voiceSteer(opt, sess, "Background only. Do not start speaking about this. Use it only if their latest utterance asked: "+text)
 }
 
 // ensureDivine keeps one six-line plate for the open branch.
