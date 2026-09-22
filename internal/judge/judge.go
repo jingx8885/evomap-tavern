@@ -212,7 +212,7 @@ var knownAttend = map[string]bool{
 var ActLabels = map[string]string{
 	ActNone:        "Just talk. No tool, no desktop action, no extra look.",
 	ActPlan:        "A slower written plan or decision is needed. Not a desktop action.",
-	ActReflect:     "They asked her to notice herself: who she is, whether she can feel her voice, face, or mood, or a fault in her own log. Not a request to edit code or use the computer. A later step on this branch may read one file or remember one line.",
+	ActReflect:     "They asked her to notice herself: who she is, whether she can feel her voice, face, or mood, or a fault in her own log. Not a request to edit code, use the computer, or look at a screenshot of her appearance. A later step on this branch may read one file or remember one line.",
 	ActLook:        "They asked how she is built, what her own code does, or to feel a specific file in her body. This branch keeps reading. If they then ask her to change herself, a later step may edit one allowlisted file. It does not reload the running process.",
 	ActCamera:      "They asked her to look through the camera now: at them, the room, or who is there. Not the computer screen, not a saved picture, and not a screenshot of her own face.",
 	ActScreen:      "They asked her to look at the computer screen now: which window or what is on the desktop. Computer-use window titles, not the camera, not a saved picture, and not a screenshot of her own face.",

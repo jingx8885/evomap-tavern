@@ -139,7 +139,7 @@ func feltShot(live Live) string {
 		s.WriteString("Speak only from that, in one or two in-character sentences. Do not invent clothes, hair, or a room.")
 		return s.String()
 	}
-	s.WriteString("The screenshot did not arrive. Say you cannot see your own face right now. Do not invent how you look.")
+	s.WriteString("No screenshot of your own face yet. If a later note gives one, speak only from that. Until then do not invent how you look.")
 	return s.String()
 }
 
