@@ -76,7 +76,7 @@ func usage() {
 
 Commands:
   run     start the duplex voice loop (WebRTC uplink + WS events)
-          flags include -vision=both|camera|screen|off (screen = Jev computer-use, not pixels)
+          flags include -vision=both|camera|screen|off (screen = Jev computer-use, not pixels; /shot is a screenshot of her own face)
   speak   one-shot TTS through the speakable channel, writes a WAV
   probe   connectivity check: call create, session.started, RTP echo
   judge   judge one text with Jev (no voice)

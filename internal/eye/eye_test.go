@@ -85,6 +85,42 @@ func TestStartDoesNotSample(t *testing.T) {
 	}
 }
 
+func TestGlanceShotIsHerFace(t *testing.T) {
+	var prompt string
+	e := New(Options{
+		LLM: fakeVision{fn: func(_ context.Context, sys, user string, jpeg []byte) (string, error) {
+			if len(jpeg) == 0 {
+				t.Error("shot jpeg empty")
+			}
+			prompt = sys + " " + user
+			return "短发，表情平静。", nil
+		}},
+	})
+	e.opt.GrabShot = func(context.Context) bool {
+		if err := e.pushJPEG(SourceShot, SolidJPEG(32, 48, color.RGBA{R: 80, G: 40, B: 20, A: 255})); err != nil {
+			t.Error(err)
+		}
+		return true
+	}
+	g := e.Glance(context.Background(), SourceShot)
+	if !strings.Contains(g.Caption, "短发") {
+		t.Fatalf("shot %q", g.Caption)
+	}
+	if !strings.Contains(prompt, "screenshot") || !strings.Contains(prompt, "appearance") {
+		t.Fatalf("prompt %q", prompt)
+	}
+	if e.Snapshot().Camera.Caption != "" || e.Snapshot().Screen.Caption != "" {
+		t.Fatal("shot glance wrote another eye")
+	}
+	cam := e.Glance(context.Background(), SourceCamera)
+	if cam.Caption != "" {
+		t.Fatalf("camera should stay empty without a room frame, got %q", cam.Caption)
+	}
+	if !strings.Contains(e.Snapshot().Shot.Caption, "短发") {
+		t.Fatal("camera glance cleared the screenshot")
+	}
+}
+
 func TestPushRejectsScreenJPEG(t *testing.T) {
 	e := New(Options{})
 	err := e.Push(SourceScreen, "data:image/jpeg;base64,aaaa")

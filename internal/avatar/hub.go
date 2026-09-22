@@ -57,6 +57,7 @@ type client struct {
 	pcm     chan []byte
 	logs    chan LogLine
 	capture chan struct{}
+	shot    chan struct{}
 }
 
 // NewHub creates an empty hub with a default idle frame.
@@ -219,13 +220,24 @@ func (h *Hub) SetSystem(get func() bool, set func(bool)) {
 
 // RequestCapture asks every viewer for one camera JPEG. There is no timer.
 func (h *Hub) RequestCapture() {
-	if h == nil {
+	h.askViewers(func(c *client) chan struct{} { return c.capture })
+}
+
+// RequestShot asks every viewer for one screenshot of her own face.
+func (h *Hub) RequestShot() {
+	h.askViewers(func(c *client) chan struct{} { return c.shot })
+}
+
+func (h *Hub) askViewers(pick func(*client) chan struct{}) {
+	if h == nil || pick == nil {
 		return
 	}
 	h.mu.Lock()
 	var chans []chan struct{}
 	for _, c := range h.clients {
-		chans = append(chans, c.capture)
+		if ch := pick(c); ch != nil {
+			chans = append(chans, ch)
+		}
 	}
 	h.mu.Unlock()
 	for _, ch := range chans {
@@ -463,6 +475,7 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 		pcm:     make(chan []byte, 64),
 		logs:    make(chan LogLine, 128),
 		capture: make(chan struct{}, 1),
+		shot:    make(chan struct{}, 1),
 	}
 	h.mu.Lock()
 	h.clients[conn] = cli
@@ -508,6 +521,11 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 			case <-cli.capture:
 				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				if err := conn.WriteJSON(map[string]any{"type": "capture"}); err != nil {
+					return
+				}
+			case <-cli.shot:
+				_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				if err := conn.WriteJSON(map[string]any{"type": "shot"}); err != nil {
 					return
 				}
 			case chunk := <-cli.pcm:

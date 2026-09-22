@@ -317,8 +317,8 @@
   let camVideo = null;
   let camStream = null;
 
-  function sendEye(dataURL) {
-    const payload = JSON.stringify({ type: "eye", source: "camera", data: dataURL });
+  function sendEye(source, dataURL) {
+    const payload = JSON.stringify({ type: "eye", source: source, data: dataURL });
     if (liveWS && liveWS.readyState === 1) {
       liveWS.send(payload);
       return;
@@ -343,7 +343,31 @@
     canvas.width = w;
     canvas.height = h;
     canvas.getContext("2d").drawImage(camVideo, 0, 0, w, h);
-    sendEye(canvas.toDataURL("image/jpeg", 0.55));
+    sendEye("camera", canvas.toDataURL("image/jpeg", 0.55));
+  }
+
+  function grabSelf() {
+    if (!app || !app.renderer || !app.renderer.extract) return;
+    let src;
+    try {
+      src = app.renderer.extract.canvas(app.stage);
+    } catch (err) {
+      return;
+    }
+    if (!src || src.width < 2 || src.height < 2) return;
+    const max = 720;
+    let w = src.width;
+    let h = src.height;
+    const scale = Math.min(1, max / Math.max(w, h));
+    w = Math.max(1, Math.round(w * scale));
+    h = Math.max(1, Math.round(h * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(src, 0, 0, w, h);
+    sendEye("shot", canvas.toDataURL("image/jpeg", 0.6));
   }
 
   const FOLD_KEY = "lov-evo-panel-fold";
@@ -880,6 +904,10 @@
           }
           if (msg && msg.type === "capture") {
             grabCamera();
+            return;
+          }
+          if (msg && msg.type === "shot") {
+            grabSelf();
             return;
           }
           applyDrive(msg);

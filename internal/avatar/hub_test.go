@@ -190,6 +190,45 @@ func TestHubRequestsOneCapture(t *testing.T) {
 	t.Fatal("viewer was not asked for one frame")
 }
 
+func TestHubRequestsOneShot(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHub()
+	srv := httptest.NewServer(h.Handler(dir))
+	defer srv.Close()
+
+	u := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(u, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	var first map[string]any
+	if err := conn.ReadJSON(&first); err != nil {
+		t.Fatal(err)
+	}
+
+	h.RequestShot()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		var msg map[string]any
+		if err := conn.ReadJSON(&msg); err != nil {
+			continue
+		}
+		if msg["type"] == "shot" {
+			return
+		}
+		if msg["type"] == "capture" {
+			t.Fatal("a self screenshot must not ask for the camera")
+		}
+	}
+	t.Fatal("viewer was not asked for one screenshot")
+}
+
 func TestHubSystemSwitch(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("ok"), 0o644); err != nil {

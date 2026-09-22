@@ -155,6 +155,13 @@ func Run(ctx context.Context, opt Options) error {
 				opt.avatarHub.RequestCapture()
 				return true
 			},
+			GrabShot: func(context.Context) bool {
+				if opt.avatarHub == nil {
+					return false
+				}
+				opt.avatarHub.RequestShot()
+				return true
+			},
 			Jev: jevClient,
 			LLM: vis,
 			Observe: func(ctx context.Context) (eye.ScreenView, error) {
@@ -176,6 +183,9 @@ func Run(ctx context.Context, opt Options) error {
 					if s.Screen.Caption != "" {
 						l.Screen = s.Screen.Caption
 					}
+					if s.Shot.Caption != "" {
+						l.Shot = s.Shot.Caption
+					}
 				})
 				sum := s.Camera.Caption
 				if s.Screen.Caption != "" {
@@ -183,6 +193,12 @@ func Run(ctx context.Context, opt Options) error {
 						sum += " | "
 					}
 					sum += s.Screen.Caption
+				}
+				if s.Shot.Caption != "" {
+					if sum != "" {
+						sum += " | "
+					}
+					sum += s.Shot.Caption
 				}
 				if strings.TrimSpace(sum) != "" {
 					opt.sense.Emit(sense.Event{Kind: sense.KindSee, Summary: clip(sum, 120)})
@@ -238,7 +254,7 @@ func Run(ctx context.Context, opt Options) error {
 	cmds := make(chan string, 16)
 	go readStdin(ctx, cmds)
 	opt.log("commands: /say <text> (speak) /steer <text> (reinstruct) " +
-		"/goal <text> (plan) /look <file> (her source) /camera /screen /sense /desk <goal> " +
+		"/goal <text> (plan) /look <file> (her source) /camera /screen /shot /sense /desk <goal> " +
 		"/stage (page) /codex <goal> (luna) /divine <question> /off /on /status /quit")
 
 	first := true
@@ -907,7 +923,7 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 		opt.log("[judge] skip (within %s)", gate.minInterval)
 		// A log question still has to land. Cooling must not drop the
 		// journal, or she answers as if she cannot see her own log.
-		if ask := sense.ParseAsk(userText); opt.sense != nil && (ask.Kind == sense.AskLog || ask.Kind == sense.AskCamera || ask.Kind == sense.AskScreen || ask.Kind == sense.AskWindow) {
+		if ask := sense.ParseAsk(userText); opt.sense != nil && (ask.Kind == sense.AskLog || ask.Kind == sense.AskCamera || ask.Kind == sense.AskScreen || ask.Kind == sense.AskShot || ask.Kind == sense.AskWindow) {
 			attend := ""
 			switch ask.Kind {
 			case sense.AskCamera:
@@ -1078,6 +1094,8 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 		startSight(ctx, opt, p, sess, eye.SourceCamera, continuing)
 	case judge.ActScreen:
 		startSight(ctx, opt, p, sess, eye.SourceScreen, continuing)
+	case judge.ActShot:
+		startSight(ctx, opt, p, sess, eye.SourceShot, continuing)
 	case judge.ActDivine:
 		ensureDivine(ctx, opt, p, lc, sess, slot, userText, continuing)
 	case judge.ActPlan:
@@ -1398,29 +1416,44 @@ func startSight(ctx context.Context, opt Options, p *persona.Persona, sess *live
 		if again {
 			return
 		}
-		voiceNudge(opt, sess, sightSpoke(source))
+		voiceNudge(opt, sess, sightSpoke(source, g.Ready && strings.TrimSpace(g.Caption) != ""))
 	}()
 }
 
 func sightAsk(source string) string {
-	if source == eye.SourceScreen {
+	switch source {
+	case eye.SourceScreen:
 		return sense.AskScreen
+	case eye.SourceShot:
+		return sense.AskShot
+	default:
+		return sense.AskCamera
 	}
-	return sense.AskCamera
 }
 
 func sightMiss(source string) string {
-	if source == eye.SourceScreen {
+	switch source {
+	case eye.SourceScreen:
 		return "You cannot look at the screen right now. Say so in character, in one short line. Do not invent what is on it. Do not describe the camera."
+	case eye.SourceShot:
+		return "You cannot see a screenshot of yourself right now. Say so in character, in one short line. Do not invent how you look. Do not describe the camera or the desktop."
+	default:
+		return "You cannot look through the camera right now. Say so in character, in one short line. Do not invent a scene. Do not describe the screen."
 	}
-	return "You cannot look through the camera right now. Say so in character, in one short line. Do not invent a scene. Do not describe the screen."
 }
 
-func sightSpoke(source string) string {
-	if source == eye.SourceScreen {
+func sightSpoke(source string, ready bool) string {
+	switch source {
+	case eye.SourceScreen:
 		return "You just looked at the screen. Say what is there in one or two in-character sentences, only from the screen note. It is window titles, not a screenshot. Do not describe the camera. Do not invent."
+	case eye.SourceShot:
+		if !ready {
+			return "The screenshot of yourself did not arrive. Say so in one short in-character line. Do not invent how you look. Do not describe the camera or the desktop."
+		}
+		return "You just looked at a screenshot of yourself. Say what you look like in one or two in-character sentences, only from the screenshot note. Do not describe the camera or the desktop. Do not invent."
+	default:
+		return "You just looked through the camera. Say what you see in one or two in-character sentences, only from the camera note. Do not describe the screen. Do not invent."
 	}
-	return "You just looked through the camera. Say what you see in one or two in-character sentences, only from the camera note. Do not describe the screen. Do not invent."
 }
 
 func glanceCommand(ctx context.Context, opt Options, p *persona.Persona, sess *livevoice.Session, source string) {
@@ -1622,8 +1655,10 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 		glanceCommand(ctx, opt, p, sess, eye.SourceCamera)
 	case line == "/screen", line == "/see screen":
 		glanceCommand(ctx, opt, p, sess, eye.SourceScreen)
+	case line == "/shot", line == "/see shot":
+		glanceCommand(ctx, opt, p, sess, eye.SourceShot)
 	case line == "/see":
-		opt.log("camera and screen are separate: /camera or /screen")
+		opt.log("camera, screen, and a screenshot of herself are separate: /camera or /screen or /shot")
 	case strings.HasPrefix(line, "/say "):
 		if err := sess.Speak(strings.TrimPrefix(line, "/say ")); err != nil {
 			opt.log("speak failed: %v", err)
@@ -1706,7 +1741,7 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 			opt.sense.Emit(sense.Event{Kind: sense.KindDesk, Summary: "codex " + rep.Status})
 		}()
 	default:
-		opt.log("unknown command (try /say /steer /goal /look /camera /screen /sense /stage /desk /codex /divine /off /on /status /quit)")
+		opt.log("unknown command (try /say /steer /goal /look /camera /screen /shot /sense /stage /desk /codex /divine /off /on /status /quit)")
 	}
 	return false
 }
