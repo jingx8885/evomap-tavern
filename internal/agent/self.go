@@ -25,9 +25,17 @@ func (c repoCoder) Edit(ctx context.Context, cwd, prompt string) (string, error)
 	return h.RunCodex(ctx, cwd, prompt)
 }
 
+// selfAgain reports whether this turn runs a self stretch. A follow-up
+// folded into the open branch talks from what she already noticed; the
+// entry Jev picking the act again asks her to look, reflect, or change
+// once more, so "好的" does not buy a second Codex edit.
+func selfAgain(jd *judge.Judgment, act string, continuing bool) bool {
+	return !continuing || (jd != nil && jd.Act == act)
+}
+
 // ensureSelf runs one ReAct stretch on reflect, look, or codex.
 // The inner Jev picks notice, read, remember, or one allowlisted change.
-// The voice path is not blocked. A follow-up on the same branch runs another stretch.
+// The voice path is not blocked.
 func ensureSelf(ctx context.Context, opt Options, p *persona.Persona, jc *jev.Client, lc *llm.Client,
 	sess *livevoice.Session, slot *capabilitySlot, jd *judge.Judgment, act, mode string) {
 	if opt.sense == nil || p == nil || !p.Sense.Enabled {

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/jingx8885/lov-evo/internal/audio"
 	"github.com/jingx8885/lov-evo/internal/avatar"
@@ -268,6 +269,7 @@ func Run(ctx context.Context, opt Options) error {
 
 	first := true
 	var lastErr error
+	var droppedAt time.Time
 	// One branch slot for the whole run. A reconnect must not let a second
 	// hands task start while the first one is still clicking.
 	slot := &capabilitySlot{}
@@ -341,9 +343,18 @@ func Run(ctx context.Context, opt Options) error {
 				}
 			}
 			first = false
+		} else if time.Since(droppedAt) > catchUpWithin {
+			opt.log("[steer] no catch-up: away %s", time.Since(droppedAt).Round(time.Second))
+		} else if note := catchUp(mem); note != "" {
+			if err := sess.Steer(note); err != nil && !errors.Is(err, livevoice.ErrHeld) {
+				opt.log("[steer] catch-up failed: %v", err)
+			} else {
+				opt.log("[steer] catch-up after reconnect")
+			}
 		}
 
 		res := pumpSession(ctx, opt, p, jevClient, llmClient, mem, pl, sess, slot, cmds)
+		droppedAt = time.Now()
 		sess.Close()
 		opt.power.Disarm()
 		opt.sense.Set(func(l *sense.Live) { l.Voice = "down" })
@@ -362,6 +373,25 @@ func Run(ctx context.Context, opt Options) error {
 			}
 		}
 	}
+}
+
+// catchUpWithin is how soon after a drop the new call still continues it.
+const catchUpWithin = 5 * time.Minute
+
+// catchUp is the silent note a new call gets after a drop: the last few
+// lines, so she picks the thread up when they speak instead of starting over.
+func catchUp(mem *memory.Memory) string {
+	lines := mem.Recent(6)
+	if len(lines) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("The call dropped and came back mid-conversation. The last lines were:\n")
+	for _, ln := range lines {
+		b.WriteString(clip(ln, 80) + "\n")
+	}
+	b.WriteString("When they speak, continue from there. Do not greet, reintroduce yourself, or read this aloud.")
+	return b.String()
 }
 
 type pumpKind int
@@ -388,6 +418,8 @@ func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
 	var lastTurnKey string
 	var lastTurnAt time.Time
 	var lastPartial string
+	var burstText string
+	var burstAt time.Time
 	gate := newJevGate()
 	// A judge timer that fires after the drop would steer a closed session.
 	defer gate.cancelTimer()
@@ -440,7 +472,39 @@ func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
 						l.LastUser = clip(ev.Text, 160)
 					}
 				})
-				armJudge(ev.Text)
+				if ev.Text != "" && sameBurst(burstText, ev.Text, burstAt) {
+					opt.voice.noteCover(burstText)
+					opt.log("[delegation] turn already handed off")
+				} else {
+					if ev.Text != "" {
+						burstText = strings.Join(strings.Fields(ev.Text), " ")
+						burstAt = time.Now()
+					}
+					armJudge(ev.Text)
+				}
+			case livevoice.EventDelegation:
+				ask := strings.TrimSpace(ev.Text)
+				opt.voice.setDelegation(ev.ID, ask)
+				opt.log("[delegation] %s", clip(ask, 120))
+				// She said a filler and waits for an answer on this id; if no
+				// work line comes, the fallback answers it.
+				awaitHandoff(opt, sess, slot, ev.ID, delegWait)
+				if ask == "" {
+					continue
+				}
+				if sameBurst(burstText, ask, burstAt) {
+					opt.voice.noteCover(burstText)
+					opt.log("[delegation] same turn, judge already scheduled")
+					continue
+				}
+				burstText = strings.Join(strings.Fields(ask), " ")
+				burstAt = time.Now()
+				opt.voice.noteCover(burstText)
+				if mem.LatestUserText() != ask {
+					mem.Add(memory.Turn{Speaker: "user", Text: ask})
+					opt.log("[user] %s", clip(ask, 120))
+				}
+				armJudge(ask)
 			case livevoice.EventTranscript:
 				if ev.Speaker == "user" {
 					shown := clip(ev.Text, 120)
@@ -486,18 +550,37 @@ const judgeQuiet = 1200 * time.Millisecond
 const earlyMinRunes = 8
 
 // judgeWorth reports whether this text may spend a System One call.
-// Mouth noise and short backchannels are not turns.
+// Mouth noise, backchannels, and clipped fragments are not turns. Three
+// Chinese characters already carry a request ("画只猫", "几点了").
 func judgeWorth(text string) bool {
 	n := strings.Join(strings.Fields(text), " ")
-	if n == "" || len([]rune(n)) < earlyMinRunes {
+	if n == "" {
 		return false
 	}
 	lower := strings.ToLower(n)
 	if strings.Contains(lower, "[mouth") || strings.Contains(lower, "[tongue") || strings.Contains(lower, "[click") || strings.Contains(lower, "noise]") {
 		return false
 	}
-	return true
+	han, filler, other := 0, 0, 0
+	for _, r := range n {
+		switch {
+		case unicode.Is(unicode.Han, r):
+			han++
+			if strings.ContainsRune(backchannelHan, r) {
+				filler++
+			}
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			other++
+		}
+	}
+	if han > 0 && han == filler && other == 0 {
+		return false
+	}
+	return han >= 3 || len([]rune(n)) >= earlyMinRunes
 }
+
+// backchannelHan is what a reply made only of acknowledgement is spelled with.
+const backchannelHan = "嗯哦噢喔啊呃额哈呵嘿唉诶欸哎好对是的呀吧呢嘛啦"
 
 // jevGate dedupes turn judgments. Partial transcripts do not call Jev;
 // turn.done does, and not again until jevMinInterval has passed.
@@ -913,10 +996,15 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 
 			mode := judge.DecideMode(jd, affect, p.Judge.SafetyThresh, pl.Current())
 			if final && opt.rel != nil {
-				if _, err := opt.rel.ObserveTurn(p.Name, userText, mem.LatestAssistantText(), jd.Emotion, jd.SelfEmotion, mode,
-					jd.Valence, jd.Arousal, jd.Engagement, jd.PersonaFitP); err != nil {
+				task := taskAct(jd.Act)
+				if _, err := opt.rel.Observe(p.Name, memory.Observed{
+					User: userText, Assistant: mem.LatestAssistantText(),
+					UserEmotion: jd.Emotion, SelfEmotion: jd.SelfEmotion,
+					Mode: mode, Intent: jd.Intent, Task: task,
+					Valence: jd.Valence, Arousal: jd.Arousal, Engagement: jd.Engagement, PersonaFit: jd.PersonaFitP,
+				}); err != nil {
 					opt.log("[relationship] save failed: %v", err)
-				} else if mode != "safety" && jd.WantKeep(judge.DefaultKeep) {
+				} else if mode != "safety" && !task && jd.WantKeep(judge.DefaultKeep) {
 					foldMemory(opt, lc, userText, mem.LatestAssistantText(), mode)
 				}
 			}
@@ -944,7 +1032,7 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 					"engage": jd.Engagement, "early": !final,
 				},
 			})
-			note := steering.BuildWithScene(p, mode, jd, affect, pl.Current(), sceneCue(opt.rel, userText))
+			note := steering.BuildWithScene(p, mode, jd, affect, pl.Current(), sceneCue(opt.rel, userText, mode))
 			ask := sense.ParseAsk(userText)
 			if ask.Kind != "" {
 				opt.sense.Set(func(l *sense.Live) { l.LastAsk = ask.Kind })
@@ -968,24 +1056,30 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 			if final {
 				note += branchSteer(slot.snapshot(), jd, mode)
 			}
+			// A handoff turn is answered on the delegation, not with a scene
+			// essay. Safety, comfort, and de-escalation still steer.
 			// The gateway rejects one append over 500 tokens. The scene
 			// note and the observation (log, camera, screen) go separately
 			// so neither one crowds the other out. While she is speaking
 			// they queue and merge into one developer flush.
-			if err := sess.Steer(livevoice.FitHead(note)); errors.Is(err, livevoice.ErrHeld) {
-				opt.log("[steer] queued mode=%s", mode)
-				opt.sense.Emit(sense.Event{Kind: sense.KindSteer, Summary: mode})
-			} else if err != nil {
-				opt.log("[steer] failed: %v", err)
+			if opt.voice.handoffTurn(userText) && !modeNeedsDirector(mode) {
+				opt.log("[steer] handoff mode=%s", mode)
 			} else {
-				opt.log("[steer] mode=%s", mode)
-				opt.sense.Emit(sense.Event{Kind: sense.KindSteer, Summary: mode})
-			}
-			if felt != "" {
-				if err := sess.Steer(livevoice.FitTail(felt)); err != nil && !errors.Is(err, livevoice.ErrHeld) {
-					opt.log("[steer] observe failed: %v", err)
-				} else if errors.Is(err, livevoice.ErrHeld) {
-					opt.log("[steer] observe queued")
+				if err := sess.Steer(livevoice.FitHead(note)); errors.Is(err, livevoice.ErrHeld) {
+					opt.log("[steer] queued mode=%s", mode)
+					opt.sense.Emit(sense.Event{Kind: sense.KindSteer, Summary: mode})
+				} else if err != nil {
+					opt.log("[steer] failed: %v", err)
+				} else {
+					opt.log("[steer] mode=%s", mode)
+					opt.sense.Emit(sense.Event{Kind: sense.KindSteer, Summary: mode})
+				}
+				if felt != "" {
+					if err := sess.Steer(livevoice.FitTail(felt)); err != nil && !errors.Is(err, livevoice.ErrHeld) {
+						opt.log("[steer] observe failed: %v", err)
+					} else if errors.Is(err, livevoice.ErrHeld) {
+						opt.log("[steer] observe queued")
+					}
 				}
 			}
 			gate.remember(jd)
@@ -1104,6 +1198,14 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 		}
 		return
 	}
+	// A turn she handed over gets an answer even when no work line comes:
+	// at once when nothing starts, after a short grace on a follow-up.
+	handoff := opt.voice.handoffTurn(userText)
+	settle := func(wait time.Duration) {
+		if handoff {
+			awaitHandoff(opt, sess, slot, opt.voice.delegation(), wait)
+		}
+	}
 	if done {
 		opt.log("[branch] done %s", orDash(open.Kind))
 		slot.close()
@@ -1113,6 +1215,7 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 		if !done && jd.Act == "" {
 			pl.Consider(ctx, mem, jd.NeedLLMP)
 		}
+		settle(0)
 		return
 	}
 	continuing := !done && open.Kind == act
@@ -1122,34 +1225,45 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 	telling := act == judge.ActDivine
 	if (hands || making || sensing || telling) && mode == "safety" {
 		opt.log("[branch] held %s", act)
+		settle(0)
 		return
 	}
 	if making && !continuing && !jd.MediaAllowed(mode) {
 		opt.log("[act] %s held mode=%s", act, orDash(mode))
+		settle(0)
 		return
 	}
 	if sensing && !continuing && !jd.PerceptAllowed(mode) {
 		opt.log("[act] %s held mode=%s", act, orDash(mode))
+		settle(0)
 		return
 	}
 	if telling && !continuing && !jd.DivineAllowed(mode) {
 		opt.log("[act] divine held mode=%s", orDash(mode))
+		settle(0)
 		return
 	}
 	if hands && !continuing {
 		if act == judge.ActComputerUse && !jd.ComputerUseAllowed(mode) {
 			opt.log("[act] computer_use held mode=%s", orDash(mode))
+			settle(0)
 			return
 		}
 		if act == judge.ActCodex && !jd.CodexAllowed(mode) {
 			opt.log("[act] codex held mode=%s", orDash(mode))
+			settle(0)
 			return
 		}
 	}
 	if continuing {
 		slot.follow(userText)
 		opt.log("[branch] stay %s", act)
+		// Re-runs answer for themselves; a queued job or a busy run does not.
+		defer settle(handoffGrace)
 	} else {
+		if !handoff {
+			opt.voice.retireAnswered()
+		}
 		if open.Kind != "" && open.Kind != act {
 			opt.log("[branch] leave %s", open.Kind)
 			slot.close()
@@ -1176,11 +1290,17 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 		_, goal, _ := slot.current()
 		if opt.stageQ != nil && !react.WantsChange(goal) {
 			startQueued(ctx, opt, nil, lc, sess, slot, act, continuing)
-		} else {
+		} else if selfAgain(jd, act, continuing) {
 			ensureSelf(ctx, opt, p, jc, lc, sess, slot, jd, act, mode)
+		} else {
+			opt.log("[self] %s follow-up, no new stretch", act)
 		}
 	case judge.ActReflect, judge.ActLook:
-		ensureSelf(ctx, opt, p, jc, lc, sess, slot, jd, act, mode)
+		if selfAgain(jd, act, continuing) {
+			ensureSelf(ctx, opt, p, jc, lc, sess, slot, jd, act, mode)
+		} else {
+			opt.log("[self] %s follow-up, no new stretch", act)
+		}
 	case judge.ActCamera:
 		startSight(ctx, opt, p, sess, eye.SourceCamera, continuing, userText)
 	case judge.ActScreen:
@@ -1203,6 +1323,7 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 			score = thresh
 		}
 		pl.Consider(ctx, mem, score)
+		settle(0)
 	}
 }
 
@@ -1604,17 +1725,115 @@ func voiceSteer(opt Options, sess *livevoice.Session, text string) {
 	}
 }
 
-// voiceNudge keeps a result in developer context. It does not open a turn.
-// She speaks only while answering them, not by starting a later line.
+// voiceNudge tells her about background work.
+// An open delegation is answered on that id: commentary so she says the
+// result, the way a handoff returns [BACKEND] text to the voice model.
+// Lines that should stay quiet stay on the developer channel.
+// With no delegation, the note stays silent so a later chat turn is not cut.
 func voiceNudge(opt Options, sess *livevoice.Session, text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
 	}
+	if id := opt.voice.delegation(); id != "" && handoffShouldSpeak(text) {
+		voiceAnswer(opt, sess, id, "commentary", text)
+		return
+	}
 	voiceSteer(opt, sess, nudgeLead+text)
 }
 
+func voiceAnswer(opt Options, sess *livevoice.Session, id, channel, text string) {
+	sess = opt.voice.live(sess)
+	if sess == nil || strings.TrimSpace(id) == "" || strings.TrimSpace(text) == "" {
+		return
+	}
+	if err := sess.Resolve(id, channel, text); errors.Is(err, livevoice.ErrHeld) {
+		opt.voice.markAnswered(id)
+		opt.log("[answer] queued")
+	} else if err != nil {
+		opt.log("[answer] failed: %v", err)
+	} else {
+		opt.voice.markAnswered(id)
+	}
+}
+
+// awaitHandoff answers id after wait if nothing else has: what is open
+// and how far it got, or an honest "nothing ran".
+func awaitHandoff(opt Options, sess *livevoice.Session, slot *capabilitySlot, id string, wait time.Duration) {
+	if id == "" {
+		return
+	}
+	time.AfterFunc(wait, func() {
+		if !opt.voice.unanswered(id) {
+			return
+		}
+		opt.log("[answer] fallback after %s", wait)
+		voiceAnswer(opt, sess, id, "commentary", handoffFallback(opt, slot))
+	})
+}
+
+// handoffFallback is what she can truthfully say when no work line came:
+// the open branch and what the queue says about it, or that nothing ran.
+func handoffFallback(opt Options, slot *capabilitySlot) string {
+	kind, _, note := slot.current()
+	if kind == "" {
+		return delegAck
+	}
+	status := stageStatus(opt, note)
+	if status == "" && slot.busy() {
+		status = "it is still running"
+	}
+	if status == "" {
+		status = strings.TrimSpace(note)
+	}
+	line := "You are still on the " + kind + " they asked for"
+	if status != "" {
+		line += "; right now " + clip(status, 160)
+	}
+	return line + ". If they asked about it, say where it stands in one short in-character line. Do not claim more than this."
+}
+
+// handoffShouldSpeak is false for progress she should keep unless asked.
+func handoffShouldSpeak(text string) bool {
+	low := strings.ToLower(text)
+	return !strings.Contains(low, "only if they ask") && !strings.Contains(low, "mention it only")
+}
+
+// sameBurst reports that two texts are one utterance split across
+// turn.done and a delegation.
+func sameBurst(prev, cur string, at time.Time) bool {
+	if at.IsZero() || time.Since(at) > 4*time.Second {
+		return false
+	}
+	prev = strings.Join(strings.Fields(prev), " ")
+	cur = strings.Join(strings.Fields(cur), " ")
+	if prev == "" || cur == "" {
+		return false
+	}
+	return prev == cur || strings.Contains(prev, cur) || strings.Contains(cur, prev)
+}
+
+func modeNeedsDirector(mode string) bool {
+	switch mode {
+	case "safety", "comfort", "de_escalate":
+		return true
+	default:
+		return false
+	}
+}
+
 const nudgeLead = "Background only. Do not start speaking about this. Use it only if their latest utterance asked: "
+
+// delegAck answers a handoff where nothing ran. It is spoken guidance on
+// commentary; delegation.context.append rejects the developer channel.
+const delegAck = "Nothing ran for this. Answer them yourself, in character, from the conversation. Do not claim you checked, looked, or ran anything."
+
+const (
+	// delegWait is the longest she waits on a handoff before a fallback.
+	delegWait = 12 * time.Second
+	// handoffGrace lets a follow-up's own line land before the status answer.
+	handoffGrace = 2 * time.Second
+)
 
 // ensureDivine keeps one six-line plate for the open branch.
 // A follow-up rereads that plate. A new toss happens only when they ask.
@@ -1930,17 +2149,33 @@ func relCue(store *memory.RelationshipStore) memory.RelationshipCue {
 	return store.Cue()
 }
 
-func sceneCue(store *memory.RelationshipStore, userText string) steering.SceneCue {
+func sceneCue(store *memory.RelationshipStore, userText, mode string) steering.SceneCue {
 	if store == nil {
 		return steering.SceneCue{}
 	}
-	c := store.Recall(userText)
+	// Only lines about this utterance come along, except when they pull
+	// away: then an old thread is something to come back to.
+	query := userText
+	if mode == "re_engage" {
+		query = ""
+	}
+	c := store.Recall(query)
 	return steering.SceneCue{
 		Stage:        c.Stage,
 		Summary:      c.Summary,
 		OpenLoops:    append([]string(nil), c.OpenLoops...),
 		SharedEvents: append([]string(nil), c.SharedEvents...),
 	}
+}
+
+// taskAct is an act that asks her to do something now. Its progress is
+// runtime state, not relationship memory.
+func taskAct(act string) bool {
+	switch act {
+	case "", judge.ActNone, judge.ActPlan, judge.ActDivine:
+		return false
+	}
+	return true
 }
 
 func foldMemory(opt Options, lc *llm.Client, userText, assistantText, mode string) {

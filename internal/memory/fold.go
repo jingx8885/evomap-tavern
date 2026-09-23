@@ -30,6 +30,7 @@ match is the existing line this op revises or closes, or empty for add.
 add: a new fact, preference, promise, unfinished thing, or a shared moment that changed the relationship.
 revise: this turn changes an existing line. text is the updated gist.
 close: this turn finishes an open loop or a promise.
+A request for the assistant to do something now (draw, look at the screen or camera, open an app, write code) and its progress are not memory; the runtime tracks them.
 If nothing should be kept, return {"notes":[]}.
 No markdown, no extra keys.`
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/jingx8885/lov-evo/internal/eye"
 	"github.com/jingx8885/lov-evo/internal/livevoice"
+	"github.com/jingx8885/lov-evo/internal/memory"
 )
 
 func TestSightFollowUpNamesTheQuestion(t *testing.T) {
@@ -27,6 +28,16 @@ func TestJudgeWorthSkipsNoiseAndFragments(t *testing.T) {
 	}
 	if !judgeWorth("就是这个 prompt 我们要配到那个代码上") {
 		t.Fatal("a real utterance should be judged")
+	}
+	for _, ask := range []string{"画一只猫", "看看屏幕", "打开记事本", "画好了吗", "几点了", "draw a cat"} {
+		if !judgeWorth(ask) {
+			t.Fatalf("a short request was never judged: %q", ask)
+		}
+	}
+	for _, ack := range []string{"好的好的好的好的", "嗯，好的。", "哈哈哈哈哈哈哈哈", "对对对"} {
+		if judgeWorth(ack) {
+			t.Fatalf("a backchannel spent a Jev call: %q", ack)
+		}
 	}
 }
 
@@ -274,6 +285,103 @@ func TestJevGateCooldownRetriesTheLatestTurn(t *testing.T) {
 	}
 	if g.claim("更新的一句") {
 		t.Fatal("the retried turn should count as judged")
+	}
+}
+
+func TestSameBurstLinksTurnAndDelegation(t *testing.T) {
+	now := time.Now()
+	if !sameBurst("帮我看一下桌面", "看一下桌面", now) {
+		t.Fatal("a shorter handoff ask is the same utterance")
+	}
+	if sameBurst("帮我看一下桌面", "另外起一卦", now) {
+		t.Fatal("a different request is not the same burst")
+	}
+	if sameBurst("帮我看一下桌面", "看一下桌面", now.Add(-5*time.Second)) {
+		t.Fatal("an old line is not this burst")
+	}
+}
+
+func TestHandoffSpeechSkipsQuietProgress(t *testing.T) {
+	if !handoffShouldSpeak("The picture is ready. Tell them in one sentence.") {
+		t.Fatal("a finished result should be spoken")
+	}
+	if handoffShouldSpeak("The computer task finished. Mention it only if they ask. Do not read logs.") {
+		t.Fatal("quiet progress must stay quiet")
+	}
+}
+
+func TestHandoffTurnMatchesTheCoveredAsk(t *testing.T) {
+	h := &voiceHold{}
+	h.setDelegation("del_1", "打开记事本")
+	if !h.handoffTurn("打开记事本") {
+		t.Fatal("the delegated ask is the handoff turn")
+	}
+	if h.handoffTurn("另外说一句") {
+		t.Fatal("a later sentence is not the handoff")
+	}
+	if h.delegation() != "del_1" {
+		t.Fatal("delegation id was dropped")
+	}
+	h.noteCover("帮我打开记事本")
+	if !h.handoffTurn("帮我打开记事本") {
+		t.Fatal("the user transcript that already went to Jev is the cover")
+	}
+	if modeNeedsDirector("continue") || !modeNeedsDirector("safety") {
+		t.Fatal("only safety modes keep the scene essay on a handoff")
+	}
+}
+
+func TestCatchUpCarriesTheLastLines(t *testing.T) {
+	mem := memory.New(8)
+	if catchUp(mem) != "" {
+		t.Fatal("an empty call has nothing to catch up on")
+	}
+	mem.Add(memory.Turn{Speaker: "user", Text: "我明天要交稿"})
+	mem.Add(memory.Turn{Speaker: "assistant", Text: "那你今晚还睡不睡了"})
+	note := catchUp(mem)
+	if !strings.Contains(note, "user: 我明天要交稿") || !strings.Contains(note, "assistant: 那你今晚还睡不睡了") {
+		t.Fatalf("catch-up lost the thread: %q", note)
+	}
+	if !strings.Contains(note, "Do not greet") {
+		t.Fatalf("catch-up would let her start over: %q", note)
+	}
+}
+
+func TestHandoffIsAnsweredOnceAndExpires(t *testing.T) {
+	h := &voiceHold{}
+	h.setDelegation("del_1", "画一只猫")
+	if !h.unanswered("del_1") {
+		t.Fatal("a fresh handoff waits for an answer")
+	}
+	h.markAnswered("del_other")
+	if !h.unanswered("del_1") {
+		t.Fatal("another id answered this handoff")
+	}
+	h.markAnswered("del_1")
+	if h.unanswered("del_1") || h.delegation() != "del_1" {
+		t.Fatal("an answered handoff still carries the task's later lines")
+	}
+	h.setDelegation("del_2", "画好了吗")
+	if h.unanswered("del_1") || !h.unanswered("del_2") {
+		t.Fatal("a new handoff replaces the old one")
+	}
+	h.delegAt = time.Now().Add(-delegLive - time.Second)
+	if h.delegation() != "" || h.unanswered("del_2") {
+		t.Fatal("an expired handoff must not speak")
+	}
+}
+
+func TestRetireKeepsAWaitingHandoff(t *testing.T) {
+	h := &voiceHold{}
+	h.setDelegation("del_1", "")
+	h.retireAnswered()
+	if h.delegation() != "del_1" {
+		t.Fatal("she is still waiting on this handoff")
+	}
+	h.markAnswered("del_1")
+	h.retireAnswered()
+	if h.delegation() != "" {
+		t.Fatal("an answered handoff must not voice new work")
 	}
 }
 

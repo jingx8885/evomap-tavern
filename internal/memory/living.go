@@ -20,6 +20,10 @@ const (
 	// mention puts the weight back. Days since Touched thin the cue
 	// further without deleting the line.
 	turnFade = 0.012
+
+	// recallMin is the overlap a line needs with the utterance to be
+	// recalled on that turn.
+	recallMin = 0.2
 )
 
 // Line is one durable memory. Text is a gist of what changed, not a
@@ -435,6 +439,11 @@ func pick(list Lines, query string, now time.Time, n int) []string {
 			}
 		}
 		if ln.Status == lineFading && query != "" && ov < 0.4 && contentOverlap(query, ln.Text) < 2 {
+			continue
+		}
+		// A strong but unrelated line would ride along every turn and she
+		// would keep bringing up the same thing.
+		if query != "" && ov < recallMin {
 			continue
 		}
 		if ln.Status == lineFading && query == "" {

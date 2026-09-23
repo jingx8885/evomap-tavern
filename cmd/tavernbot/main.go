@@ -707,6 +707,12 @@ func cmdLoopProbe(args []string) int {
 	baseURL, personaPath, key, verbose := commonFlags(fs)
 	wav := fs.String("wav", "", "s16le WAV to inject as user speech")
 	timeout := fs.Duration("timeout", 25*time.Second, "max wait after inject")
+	reply := fs.String("reply", "", "answer her first client delegation with this text, then wait out -timeout")
+	replyChannel := fs.String("reply-channel", "commentary", "channel for -reply")
+	replyDelay := fs.Duration("reply-delay", 1500*time.Millisecond, "wait before answering the delegation")
+	then := fs.String("then", "", "answer the same delegation again with this text after -then-delay")
+	thenDelay := fs.Duration("then-delay", 12*time.Second, "wait after -reply before -then")
+	steer := fs.String("steer", "", "developer note sent as soon as the delegation arrives, before -reply")
 	fs.Parse(args)
 	if strings.TrimSpace(*wav) == "" {
 		fmt.Fprintln(os.Stderr, "--wav required")
@@ -784,11 +790,31 @@ func cmdLoopProbe(args []string) int {
 		return len([]rune(u)) >= 6 && len([]rune(a)) >= 6
 	}
 	lockUser := false
+	resolved := ""
 	for time.Now().Before(deadline) {
 		select {
 		case ev := <-sess.Events():
 			kinds[ev.Kind]++
 			switch ev.Kind {
+			case livevoice.EventDelegation:
+				fmt.Printf("delegation id=%s text=%q\n", ev.ID, ev.Text)
+				if *reply != "" && resolved == "" {
+					resolved = ev.ID
+					if *steer != "" {
+						fmt.Printf("steer err=%v\n", sess.Steer(*steer))
+					}
+					go func(id string) {
+						time.Sleep(*replyDelay)
+						err := sess.Resolve(id, *replyChannel, *reply)
+						fmt.Printf("resolve id=%s channel=%s err=%v\n", id, *replyChannel, err)
+						if *then == "" {
+							return
+						}
+						time.Sleep(*thenDelay)
+						err = sess.Resolve(id, *replyChannel, *then)
+						fmt.Printf("resolve again id=%s err=%v\n", id, err)
+					}(ev.ID)
+				}
 			case livevoice.EventTranscript:
 				fmt.Printf("transcript speaker=%s text=%q\n", ev.Speaker, ev.Text)
 				if ev.Speaker == "user" && strings.TrimSpace(ev.Text) != "" && !lockUser {
@@ -824,7 +850,7 @@ func cmdLoopProbe(args []string) int {
 			}
 		case <-time.After(300 * time.Millisecond):
 		}
-		if time.Now().After(minWait) && replyOK() {
+		if *reply == "" && time.Now().After(minWait) && replyOK() {
 			gotTurn = true
 			break
 		}
@@ -844,6 +870,7 @@ done:
 		"mouth_tail": mouth,
 		"echo":       sess.EchoCount(),
 		"events":     kinds,
+		"resolved":   resolved,
 	}
 	if strings.TrimSpace(user) != "" {
 		jc := jev.NewClient(config.ResolveBaseURL(*baseURL), mustKey(*key), "")

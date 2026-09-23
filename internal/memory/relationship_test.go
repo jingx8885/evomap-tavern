@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRelationshipPersists(t *testing.T) {
@@ -83,6 +84,112 @@ func TestRecallPrefersTheSubject(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(cue.OpenLoops, " "), "爬山") {
 		t.Fatalf("unrelated line crowded the cue: %+v", cue)
+	}
+}
+
+func TestClosenessKeepsMovingNearTheTop(t *testing.T) {
+	s, err := NewRelationshipStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	warm := Observed{User: "今天升职了", Mode: "celebrate", Intent: "share_good", Valence: 0.9, Engagement: 0.9, PersonaFit: 0.9}
+	for i := 0; i < 200; i++ {
+		if _, err := s.Observe("小春", warm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	top := s.Snapshot()
+	if top.Bond >= 1 || top.Trust >= 1 || top.Stage != relationshipStageBonded {
+		t.Fatalf("closeness pinned or never arrived: %+v", top)
+	}
+	sour := Observed{User: "你烦不烦", Mode: "de_escalate", Intent: "other", Valence: 0.1, Engagement: 0.5}
+	for i := 0; i < 3; i++ {
+		if _, err := s.Observe("小春", sour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after := s.Snapshot()
+	if after.Warmth >= top.Warmth-0.05 {
+		t.Fatalf("warmth did not follow a sour stretch: %.2f -> %.2f", top.Warmth, after.Warmth)
+	}
+	if after.Stage != relationshipStageBonded {
+		t.Fatalf("one sour stretch flipped the stage: %+v", after)
+	}
+}
+
+func TestTimeApartCools(t *testing.T) {
+	s, err := NewRelationshipStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.rel = normalizeRelationship(Relationship{
+		Stage: relationshipStageBonded, Bond: 1, Trust: 1, Warmth: 1, Tension: 0.5,
+		UpdatedAt: time.Now().Add(-30 * 24 * time.Hour),
+	})
+	rel, err := s.Observe("小春", Observed{User: "好久不见", Mode: "continue", Intent: "chat", Valence: 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel.Bond >= 0.9 || rel.Bond < bondFloor || rel.Warmth >= 0.8 || rel.Tension >= 0.1 {
+		t.Fatalf("a month apart should cool, not erase: %+v", rel)
+	}
+	fresh, _ := NewRelationshipStore("")
+	if got, _ := fresh.Observe("小春", Observed{User: "你好", Mode: "continue", Valence: 0.5}); got.Bond < 0.08 {
+		t.Fatalf("a new bond fell below its start: %+v", got)
+	}
+}
+
+func TestTurnRecallLeavesUnrelatedLinesOut(t *testing.T) {
+	s, err := NewRelationshipStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range []MemoryOp{
+		{Op: "add", Kind: KindShared, Text: "周末去爬山"},
+		{Op: "add", Kind: KindOpenLoop, Text: "明天要交稿"},
+	} {
+		if _, err := s.Apply(op); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Observe("小春", Observed{User: "我最近在学吉他", Mode: "continue", Intent: "chat", Valence: 0.6}); err != nil {
+		t.Fatal(err)
+	}
+	cue := s.Recall("我今天好累")
+	if len(cue.OpenLoops)+len(cue.SharedEvents) != 0 || cue.Summary != "" {
+		t.Fatalf("unrelated memory rode along: %+v", cue)
+	}
+	if cue := s.Recall("我最近在学吉他"); strings.Contains(cue.Summary, "上次说到") {
+		t.Fatalf("the line just said came back as a memory: %q", cue.Summary)
+	}
+	all := s.Recall("")
+	if len(all.OpenLoops) == 0 || len(all.SharedEvents) == 0 || !strings.Contains(all.Summary, "吉他") {
+		t.Fatalf("the open view lost its lines: %+v", all)
+	}
+}
+
+func TestTaskTurnIsNotRemembered(t *testing.T) {
+	s, err := NewRelationshipStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Observe("小春", Observed{User: "我在养一只橘猫", Mode: "continue", Intent: "share_good", Valence: 0.7}); err != nil {
+		t.Fatal(err)
+	}
+	for _, turn := range []Observed{
+		{User: "帮我画一只猫，别忘了加帽子", Mode: "continue", Intent: "request", Task: true},
+		{User: "现在呢，画画了吗", Mode: "continue", Intent: "request"},
+	} {
+		if _, err := s.Observe("小春", turn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rel := s.Snapshot()
+	if len(rel.OpenLoops) != 0 {
+		t.Fatalf("a task became an open loop: %+v", rel.OpenLoops)
+	}
+	if !strings.Contains(rel.LastTopic, "橘猫") {
+		t.Fatalf("a request replaced the topic: %q", rel.LastTopic)
 	}
 }
 

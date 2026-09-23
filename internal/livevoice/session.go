@@ -43,6 +43,9 @@ const (
 	EventWarning    = "warning" // non-fatal: silent mic, degraded uplink
 	EventError      = "error"
 	EventClosed     = "closed"
+	// EventDelegation: she handed the latest request to the client and
+	// waits for Resolve. ID is the delegation item; Text is her ask.
+	EventDelegation = "delegation"
 )
 
 // Event is one thing the session wants the agent to know.
@@ -50,6 +53,7 @@ type Event struct {
 	Kind    string
 	Speaker string // for EventTranscript: "user" | "assistant"
 	Text    string
+	ID      string // for EventDelegation
 	Usage   map[string]any
 	Err     error
 }
@@ -123,12 +127,17 @@ type Session struct {
 	noteFn     func(string)
 	// contextSend overrides AppendContext in tests.
 	contextSend func(channel, text string) error
+	// delegationSend overrides Resolve's wire message in tests.
+	delegationSend func(id, channel, text string) error
 }
 
 // deferredNote is one context append waiting until she is quiet.
+// A note with a delegation id answers that delegation and only merges
+// with later answers to the same one.
 type deferredNote struct {
-	channel string
-	text    string
+	channel    string
+	delegation string
+	text       string
 }
 
 // ErrHeld means a context append waited instead of cutting the live line.
@@ -590,7 +599,7 @@ func (s *Session) handleEvent(data []byte) {
 	if s.Verbose && !quietEvent(etype) {
 		if tx := transcriptText(ev); tx != "" {
 			s.logf("event %s text=%q", etype, clipRunes(tx, 80))
-		} else if etype == "session.started" {
+		} else if etype == "session.started" || strings.Contains(etype, "delegation") {
 			s.logf("event %s %s", etype, clipRunes(string(data), 400))
 		} else {
 			s.logf("event %s", etype)
@@ -672,6 +681,10 @@ func (s *Session) handleEvent(data []byte) {
 			s.markLineClosed()
 		}
 		s.finishTurn(role, transcriptText(ev))
+	case etype == "delegation.created" || etype == "session.delegation.created":
+		if id, text := delegationOf(ev); id != "" {
+			s.emit(Event{Kind: EventDelegation, ID: id, Text: text})
+		}
 	case etype == "session.usage.updated":
 		s.markStarted()
 		usage, _ := ev["usage"].(map[string]any)
@@ -692,9 +705,16 @@ func (s *Session) markStarted() {
 
 func (s *Session) finishTurn(role, eventText string) {
 	user := s.turnUser.String()
-	assistant := s.turnAssistant.String()
-	if assistant == "" {
-		assistant = s.interim.String()
+	// The user's turn.done often lands after she has begun answering.
+	// Her half line waits for her own turn.done; sending it here put a
+	// fragment before the user's words and the whole line again after.
+	keepLine := role == "user" && s.Speaking()
+	assistant := ""
+	if !keepLine {
+		assistant = s.turnAssistant.String()
+		if assistant == "" {
+			assistant = s.interim.String()
+		}
 	}
 	if eventText != "" {
 		if role == "user" {
@@ -706,8 +726,10 @@ func (s *Session) finishTurn(role, eventText string) {
 		}
 	}
 	s.turnUser.Reset()
-	s.turnAssistant.Reset()
-	s.interim.Reset()
+	if !keepLine {
+		s.turnAssistant.Reset()
+		s.interim.Reset()
+	}
 	s.emit(Event{Kind: EventTurnDone, Speaker: role, Text: user,
 		Usage: map[string]any{"assistant": assistant}})
 }
@@ -792,6 +814,51 @@ func transcriptText(ev map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// delegationOf reads a client delegation. The gateway sends
+// {"item":{"id":..,"content":[{"type":"input_text","text":..}]}};
+// the public API names the object "delegation".
+func delegationOf(ev map[string]any) (id, text string) {
+	for _, k := range []string{"item", "delegation"} {
+		m, ok := ev[k].(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ = m["id"].(string)
+		text = contentText(m["content"])
+		if text == "" {
+			text, _ = m["text"].(string)
+		}
+		if id != "" {
+			break
+		}
+	}
+	if id == "" {
+		id, _ = ev["delegation_id"].(string)
+	}
+	return strings.TrimSpace(id), strings.TrimSpace(text)
+}
+
+func contentText(v any) string {
+	parts, ok := v.([]any)
+	if !ok {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		m, ok := p.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := m["text"].(string); strings.TrimSpace(t) != "" {
+			if b.Len() > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(strings.TrimSpace(t))
+		}
+	}
+	return b.String()
 }
 
 // detectSpeaker distinguishes user vs assistant transcript events.
@@ -927,6 +994,46 @@ func (s *Session) Nudge(cue string) error {
 	return s.sendContext("commentary", cue)
 }
 
+// Resolve answers a delegation she handed to the client. On commentary
+// she says the result in her own words; speakable is read verbatim. The
+// same id may be answered again when a slow task ends. It waits for her
+// line like other notes.
+func (s *Session) Resolve(id, channel, text string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("delegation id required")
+	}
+	switch channel {
+	case "commentary", "speakable":
+	default:
+		// Upstream rejects every other channel on delegation.context.append.
+		return fmt.Errorf("delegation channel %q: want commentary or speakable", channel)
+	}
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	if s.holdFor(channel, id, text) {
+		return ErrHeld
+	}
+	return s.sendDelegation(id, channel, FitHead(text))
+}
+
+func (s *Session) sendDelegation(id, channel, text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	if s.delegationSend != nil {
+		return s.delegationSend(id, channel, text)
+	}
+	return s.sendJSON(map[string]any{
+		"type":               "delegation.context.append",
+		"delegation_item_id": id,
+		"channel":            channel,
+		"content":            []map[string]string{{"type": "input_text", "text": text}},
+	})
+}
+
 // Respond asks the model to produce a response turn.
 func (s *Session) Respond() error {
 	return s.sendJSON(map[string]any{"type": "response.create"})
@@ -1001,6 +1108,10 @@ func (s *Session) rescheduleDeferred() {
 // hold queues text when a line is in progress or an older note is
 // already waiting. The caller must not also send it.
 func (s *Session) hold(channel, text string) bool {
+	return s.holdFor(channel, "", text)
+}
+
+func (s *Session) holdFor(channel, delegation, text string) bool {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return true
@@ -1010,20 +1121,20 @@ func (s *Session) hold(channel, text string) bool {
 	if !s.Speaking() && len(s.deferred) == 0 {
 		return false
 	}
-	s.enqueueLocked(channel, text)
+	s.enqueueLocked(channel, delegation, text)
 	return true
 }
 
-func (s *Session) enqueueLocked(channel, text string) {
+func (s *Session) enqueueLocked(channel, delegation, text string) {
 	for i := range s.deferred {
-		if s.deferred[i].channel != channel {
+		if s.deferred[i].channel != channel || s.deferred[i].delegation != delegation {
 			continue
 		}
 		s.deferred[i].text = mergeNotes(s.deferred[i].text, text)
 		s.armDeferLocked()
 		return
 	}
-	s.deferred = append(s.deferred, deferredNote{channel: channel, text: text})
+	s.deferred = append(s.deferred, deferredNote{channel: channel, delegation: delegation, text: text})
 	s.armDeferLocked()
 }
 
@@ -1094,21 +1205,27 @@ func (s *Session) flushDeferred() {
 			text = FitTail(item.text)
 		}
 		var err error
-		if item.channel == "speakable" {
+		switch {
+		case item.delegation != "":
+			err = s.sendDelegation(item.delegation, item.channel, text)
+		case item.channel == "speakable":
 			err = s.sendSpeakable(text)
-		} else {
+		default:
 			err = s.sendContextFitted(item.channel, text)
 		}
 		if err != nil {
-			s.note(fmt.Sprintf("[%s] after line failed: %v", noteTag(item.channel), err))
+			s.note(fmt.Sprintf("[%s] after line failed: %v", noteTag(item), err))
 			continue
 		}
-		s.note(fmt.Sprintf("[%s] after line", noteTag(item.channel)))
+		s.note(fmt.Sprintf("[%s] after line", noteTag(item)))
 	}
 }
 
-func noteTag(channel string) string {
-	if channel == "commentary" {
+func noteTag(item deferredNote) string {
+	switch {
+	case item.delegation != "":
+		return "answer"
+	case item.channel == "commentary":
 		return "nudge"
 	}
 	return "steer"
@@ -1186,8 +1303,9 @@ func (s *Session) emit(ev Event) {
 	// Closed/error must not be dropped: the agent reconnects on them.
 	// turn.done must not be dropped either. A burst of partial
 	// transcripts used to fill this channel and the turn never reached
-	// Jev, so the voice model stayed in a reply.
-	if ev.Kind == EventClosed || ev.Kind == EventError || ev.Kind == EventTurnDone {
+	// Jev, so the voice model stayed in a reply. A dropped delegation
+	// leaves her waiting on an answer that never comes.
+	if ev.Kind == EventClosed || ev.Kind == EventError || ev.Kind == EventTurnDone || ev.Kind == EventDelegation {
 		select {
 		case s.events <- ev:
 		case <-time.After(time.Second):

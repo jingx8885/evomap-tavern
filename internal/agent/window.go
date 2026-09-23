@@ -22,17 +22,123 @@ import (
 )
 
 type voiceHold struct {
-	mu   sync.Mutex
-	sess *livevoice.Session
+	mu       sync.Mutex
+	sess     *livevoice.Session
+	delegID  string
+	delegAt  time.Time
+	answered bool
+	cover    string
+	coverAt  time.Time
 }
+
+// delegLive bounds how late work may still answer a handoff out loud.
+const delegLive = 10 * time.Minute
 
 func (h *voiceHold) bind(s *livevoice.Session) {
 	if h == nil {
 		return
 	}
 	h.mu.Lock()
+	// A new call invalidates the previous delegation id. Unbinding at
+	// shutdown must not wipe it: a job can still answer the live call.
+	if s != nil && h.sess != nil && h.sess != s {
+		h.delegID = ""
+		h.cover = ""
+	}
 	h.sess = s
 	h.mu.Unlock()
+}
+
+func (h *voiceHold) setDelegation(id, ask string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.delegID = strings.TrimSpace(id)
+	h.delegAt = time.Now()
+	h.answered = false
+	if ask = strings.TrimSpace(ask); ask != "" {
+		h.cover = strings.Join(strings.Fields(ask), " ")
+		h.coverAt = time.Now()
+	}
+	h.mu.Unlock()
+}
+
+// retireAnswered keeps work she was not handed from speaking through an
+// old, already answered handoff. One still waiting keeps its id: she has
+// said a filler and needs an answer.
+func (h *voiceHold) retireAnswered() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.answered {
+		h.delegID = ""
+		h.cover = ""
+	}
+	h.mu.Unlock()
+}
+
+func (h *voiceHold) markAnswered(id string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if id != "" && id == h.delegID {
+		h.answered = true
+	}
+	h.mu.Unlock()
+}
+
+// unanswered reports that id is still the live handoff and has no answer.
+func (h *voiceHold) unanswered(id string) bool {
+	if h == nil || id == "" {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return id == h.delegID && !h.answered && time.Since(h.delegAt) <= delegLive
+}
+
+func (h *voiceHold) noteCover(text string) {
+	if h == nil {
+		return
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	if text == "" {
+		return
+	}
+	h.mu.Lock()
+	h.cover = text
+	h.coverAt = time.Now()
+	h.mu.Unlock()
+}
+
+func (h *voiceHold) delegation() string {
+	if h == nil {
+		return ""
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if time.Since(h.delegAt) > delegLive {
+		return ""
+	}
+	return h.delegID
+}
+
+// handoffTurn reports that this utterance is the one she just handed off.
+// The long scene essay stays off that turn; safety modes still steer.
+func (h *voiceHold) handoffTurn(text string) bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.delegID == "" || h.cover == "" || time.Since(h.coverAt) > 20*time.Second {
+		return false
+	}
+	n := strings.Join(strings.Fields(text), " ")
+	return n != "" && n == h.cover
 }
 
 // live returns the bound session, or fallback when none is bound.
@@ -246,6 +352,12 @@ func runQueued(ctx context.Context, opt Options, pl *planner.Planner, lc *llm.Cl
 		slot.closeIf(branchKind)
 		return
 	}
+	// Composing the prompt is a slow LLM call; her handoff is answered first.
+	if jobKind == window.KindCodex {
+		voiceNudge(opt, sess, "You just queued a Codex job that writes the program in its own folder; it shows on the stage queue. Tell them in one short in-character line that it has begun. Do not say it is finished.")
+	} else {
+		voiceNudge(opt, sess, "You just started a "+jobKind+". Tell them in one short in-character line that it has begun. Do not say it is ready. Do not describe a finished result.")
+	}
 	prompt := goal
 	if jobKind != window.KindLLM && jobKind != window.KindCodex {
 		var completer studio.Completer
@@ -259,11 +371,6 @@ func runQueued(ctx context.Context, opt Options, pl *planner.Planner, lc *llm.Cl
 	openStage(opt)
 	if opt.sense != nil {
 		opt.sense.Emit(sense.Event{Kind: sense.KindStage, Summary: jobKind + " queued " + job.ID})
-	}
-	if jobKind == window.KindCodex {
-		voiceNudge(opt, sess, "You just queued a Codex job that writes the program in its own folder; it shows on the stage queue. Tell them in one short in-character line that it has begun. Do not say it is finished.")
-	} else {
-		voiceNudge(opt, sess, "You just started a "+jobKind+". Tell them in one short in-character line that it has begun. Do not say it is ready. Do not describe a finished result.")
 	}
 	done, err := opt.stageQ.Wait(ctx, job.ID)
 	if err != nil {
@@ -291,17 +398,51 @@ func runQueued(ctx context.Context, opt Options, pl *planner.Planner, lc *llm.Cl
 
 // failedLine gives her the real cause so she does not invent one.
 func failedLine(errText string) string {
-	reason := "the service returned an error"
+	return "That did not finish: " + failReason(errText) + ". Say so simply, in character. Do not blame the page. Do not invent a file, a picture, or another tool."
+}
+
+func failReason(errText string) string {
 	low := strings.ToLower(errText)
 	switch {
 	case strings.Contains(low, "model_not_found") || strings.Contains(low, "no available channel"):
-		reason = "the gateway has no channel for that model, so it cannot be made right now; the gateway needs it enabled"
+		return "the gateway has no channel for that model, so it cannot be made right now; the gateway needs it enabled"
 	case strings.Contains(low, "timeout") || strings.Contains(low, "deadline"):
-		reason = "it timed out"
+		return "it timed out"
 	case strings.Contains(low, "codex cli not found"):
-		reason = "the Codex CLI is not installed on this machine"
+		return "the Codex CLI is not installed on this machine"
 	}
-	return "That did not finish: " + reason + ". Say so simply, in character. Do not blame the page. Do not invent a file, a picture, or another tool."
+	return "the service returned an error"
+}
+
+// stageStatus reads the job a branch note names ("image queued j3") off
+// the queue, so a status answer says what the queue says.
+func stageStatus(opt Options, note string) string {
+	f := strings.Fields(note)
+	if opt.stageQ == nil || len(f) < 3 || f[1] != "queued" {
+		return ""
+	}
+	for _, j := range opt.stageQ.Snapshot() {
+		if j.ID != f[2] {
+			continue
+		}
+		switch j.Status {
+		case window.StatusQueued:
+			return "the " + j.Kind + " is waiting in the queue"
+		case window.StatusRunning:
+			return fmt.Sprintf("the %s is being made, about %.0f%% done", j.Kind, j.Ratio*100)
+		case window.StatusReady:
+			s := "the " + j.Kind + " is ready on the stage window"
+			if j.Look != "" {
+				s += "; it shows " + clip(j.Look, 120)
+			}
+			return s
+		case window.StatusFailed:
+			return "the " + j.Kind + " failed: " + failReason(j.Err)
+		case window.StatusCanceled:
+			return "the " + j.Kind + " was canceled"
+		}
+	}
+	return ""
 }
 
 func readyLine(kind string, job window.Job) string {

@@ -70,6 +70,7 @@ Jev 是 System One。一次请求 = 一份 `state` + 一组 typed `questions`，
 - 客户端：`internal/jev`，只打 new-api 的 `/v1/systemone`，禁止 chat completions，禁止直连 `api.typesafe.ai`。
 - 推测性判断：部分 transcript 防抖 320ms 先判一次，好让 steering 赶在双工还在说的时候落地；`turn.done` 再确认。空用户文本（问候、自言自语）不要送去判，否则会误触发 `re_engage` 复读。
 - planner 不再为门控单独打 Jev；用这一轮已经有的 `need_llm`。
+- 最终轮值不值得判（`judgeWorth`）：三个汉字就算一句（“画只猫”“几点了”“看看屏幕”），整句只有语气字（嗯 / 好的 / 哈哈）不判，非中文仍按 8 个字符。不要再按字符数一刀切，中文短指令会永远没人执行。
 
 ---
 
@@ -120,7 +121,9 @@ LLM 输出约定：planner / desk 文本都走严格 JSON（`note` 或 `text`）
 | `developer` | 静默参考，不念、不主动回 | Jev 之后的 steering、`/steer`、sense 体感 |
 | `commentary` | 注入后模型会主动开口 | planner 长期 nudge，不要拿来塞每轮 steering |
 
-其它协议事实：上行只走 WebRTC RTP，WS 音频事件会被拒；`delegation.type` 只有 `client`；`response.create` 不可用。用户转录依赖网关形态，没有用户文本时 Jev 会从最近 exchange 推断——但 agent 循环对空用户文本直接跳过判断。
+其它协议事实：上行只走 WebRTC RTP，WS 音频事件会被拒；`delegation.type` 只有 `client`；`response.create` 不可用。
+
+**client 委派必须有人回复。** 她把做不了的事交给客户端时（`delegation.created`），会先说一句垫话再等着；不回复她就停在半句上。回复走 `delegation.context.append`，只收 `commentary` / `speakable`，`developer` 被拒，developer steering 也不算回复。同一个 id 可以回多次（先“开始了”，再结果）。编排见 `voiceAnswer` / `awaitHandoff`，细节在 `docs/protocol.md`。用户转录依赖网关形态，没有用户文本时 Jev 会从最近 exchange 推断——但 agent 循环对空用户文本直接跳过判断。
 
 ---
 
@@ -227,6 +230,8 @@ docs/protocol.md        gpt-live 协议事实
 ```
 
 人设换 YAML 即换角色。阈值在 `judge.*` / `planner.*` / `sense.enabled`。不要把人设台词写进双工以外的模型。
+
+关系账本（`memory/relationship.go`、`living.go`）：每轮 steering 只带和这句话相关的旧事，对方冷下来（`re_engage`）时才放一条无关的旧线头；“上次说到”只在记忆面板里出现，不进每轮召回。让她现在去做的事（画图、看屏幕、开应用、写代码）不写成未完事项，也不触发慢模型 fold，进度由运行时自己跟。亲密度每轮只补剩余差距的一部分，温度跟着这一段聊天走，隔几天没聊会回落，阶段往下掉要多退一截（回滞）。
 
 ---
 

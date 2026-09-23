@@ -240,6 +240,93 @@ func TestSteerDuringSpeechWaitsAndMerges(t *testing.T) {
 	}
 }
 
+func TestUserTurnDoneLeavesHerHalfLine(t *testing.T) {
+	s := &Session{events: make(chan Event, 16)}
+	s.handleEvent([]byte(`{"type":"session.output_transcript.delta","delta":"嗯哼，窗"}`))
+	s.handleEvent([]byte(`{"type":"turn.done","role":"user","transcript":"你给我画一只橘猫吧"}`))
+	s.handleEvent([]byte(`{"type":"session.output_transcript.delta","delta":"台橘猫是吧？"}`))
+	s.handleEvent([]byte(`{"type":"turn.done","role":"assistant"}`))
+	close(s.events)
+	var done []Event
+	for ev := range s.events {
+		if ev.Kind == EventTurnDone {
+			done = append(done, ev)
+		}
+	}
+	if len(done) != 2 {
+		t.Fatalf("turns %+v", done)
+	}
+	if done[0].Text != "你给我画一只橘猫吧" || done[0].Usage["assistant"] != "" {
+		t.Fatalf("user turn carried her half line: %+v", done[0])
+	}
+	if done[1].Text != "" || done[1].Usage["assistant"] != "嗯哼，窗台橘猫是吧？" {
+		t.Fatalf("her line: %+v", done[1])
+	}
+}
+
+func TestDelegationCreated(t *testing.T) {
+	s := &Session{events: make(chan Event, 2)}
+	s.handleEvent([]byte(`{"type":"delegation.created","item":{"id":"del_1","content":[{"type":"input_text","text":"打开记事本"}]}}`))
+	ev := <-s.events
+	if ev.Kind != EventDelegation || ev.ID != "del_1" || ev.Text != "打开记事本" {
+		t.Fatalf("%+v", ev)
+	}
+}
+
+func TestResolveWhileSpeakingWaitsForThatDelegation(t *testing.T) {
+	s := &Session{}
+	var sent []string
+	s.delegationSend = func(id, channel, text string) error {
+		sent = append(sent, id+"|"+channel+"|"+text)
+		return nil
+	}
+	s.markSpeaking()
+	if err := s.Resolve("d1", "commentary", "The picture is ready."); !errors.Is(err, ErrHeld) {
+		t.Fatal(err)
+	}
+	if err := s.Resolve("d1", "commentary", "Say it is saved."); !errors.Is(err, ErrHeld) {
+		t.Fatal(err)
+	}
+	if err := s.Resolve("d2", "speakable", "Here it is."); !errors.Is(err, ErrHeld) {
+		t.Fatal(err)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("answered during the line: %v", sent)
+	}
+	releaseLine(s)
+	s.flushDeferred()
+	if len(sent) != 2 {
+		t.Fatalf("sent %v", sent)
+	}
+	if sent[0] != "d1|commentary|The picture is ready.\nSay it is saved." {
+		t.Fatalf("merged commentary: %s", sent[0])
+	}
+	if sent[1] != "d2|speakable|Here it is." {
+		t.Fatalf("speakable answer: %s", sent[1])
+	}
+}
+
+func TestResolveRejectsDeveloper(t *testing.T) {
+	s := &Session{}
+	var sent []string
+	s.delegationSend = func(id, channel, text string) error {
+		sent = append(sent, id+"|"+channel+"|"+text)
+		return nil
+	}
+	if err := s.Resolve("d1", "developer", "ack"); err == nil || errors.Is(err, ErrHeld) {
+		t.Fatalf("developer answer accepted: %v", err)
+	}
+	s.markSpeaking()
+	if err := s.Resolve("d1", "developer", "ack"); err == nil || errors.Is(err, ErrHeld) {
+		t.Fatalf("developer answer held: %v", err)
+	}
+	releaseLine(s)
+	s.flushDeferred()
+	if len(sent) != 0 {
+		t.Fatalf("sent %v", sent)
+	}
+}
+
 func TestSteerBeforeSpeechSendsNow(t *testing.T) {
 	s := &Session{}
 	var got string

@@ -478,3 +478,75 @@ func waitKind(t *testing.T, st *window.Stage, kind string) {
 func slotOpen(slot *capabilitySlot) string {
 	return slot.snapshot().Kind
 }
+
+func TestSelfFollowUpRunsOnlyWhenAskedAgain(t *testing.T) {
+	opt, slot, _ := routeRig(t, nil)
+	run := func(jd *judge.Judgment) {
+		dispatchCapability(context.Background(), opt, routePersona(), nil, nil, memory.New(4), routePlanner(nil), nil, slot, jd, "continue", jd.UserText, true)
+		waitUntil(t, 3*time.Second, func() bool { return !slot.busy() })
+	}
+	stretches := func() int {
+		n := 0
+		for _, ev := range opt.sense.Snapshot("").Recent {
+			if ev.Summary == "look" {
+				n++
+			}
+		}
+		return n
+	}
+	run(parsedTurn("你内部是怎么活的", "request", "neutral", judge.ActLook, "", 0))
+	if slotOpen(slot) != judge.ActLook || stretches() != 1 {
+		t.Fatalf("look did not open: kind=%s stretches=%d", slotOpen(slot), stretches())
+	}
+	run(parsedTurn("好的，挺有意思", "chat", "neutral", judge.ActNone, "", 0))
+	if slotOpen(slot) != judge.ActLook || stretches() != 1 {
+		t.Fatalf("a folded follow-up ran another stretch: kind=%s stretches=%d", slotOpen(slot), stretches())
+	}
+	run(parsedTurn("那你的记忆模块是怎么写的", "request", "neutral", judge.ActLook, "", 0))
+	if stretches() != 2 {
+		t.Fatalf("picking look again did not look again: stretches=%d", stretches())
+	}
+}
+
+func TestHandoffStaysBoundToItsTurn(t *testing.T) {
+	opt, slot, release := routeRig(t, nil)
+	defer release()
+	run := func(jd *judge.Judgment) {
+		dispatchCapability(context.Background(), opt, routePersona(), nil, nil, memory.New(4), routePlanner(nil), nil, slot, jd, "continue", jd.UserText, true)
+	}
+	opt.voice.setDelegation("del_1", "画一朵红玫瑰")
+	opt.voice.markAnswered("del_1")
+	run(parsedTurn("随便聊聊", "chat", "neutral", judge.ActNone, "", 0))
+	if opt.voice.delegation() != "del_1" {
+		t.Fatal("chat dropped the handoff a running task still answers on")
+	}
+	run(parsedTurn("画一只猫", "request", "neutral", judge.ActImage, "", 0))
+	if opt.voice.delegation() != "" {
+		t.Fatal("work opened on a turn she kept spoke through an old handoff")
+	}
+	opt.voice.setDelegation("del_2", "改成一段视频")
+	run(parsedTurn("改成一段视频", "request", "neutral", judge.ActVideo, "", 0))
+	if slotOpen(slot) != judge.ActVideo || opt.voice.delegation() != "del_2" {
+		t.Fatalf("handed-off work lost its id: kind=%s id=%q", slotOpen(slot), opt.voice.delegation())
+	}
+}
+
+func TestHandoffFallbackSaysWhatIsTrue(t *testing.T) {
+	opt, slot, release := routeRig(t, nil)
+	defer release()
+	if got := handoffFallback(opt, slot); got != delegAck {
+		t.Fatalf("idle fallback = %q", got)
+	}
+	job := opt.stageQ.Enqueue(window.KindImage, "a red rose")
+	slot.open(judge.ActImage, "画一朵红玫瑰")
+	slot.setNote(window.KindImage + " queued " + job.ID)
+	waitJob(t, opt.stageQ, window.KindImage, window.StatusRunning)
+	if got := handoffFallback(opt, slot); !strings.Contains(got, "being made") || strings.Contains(got, "ready") {
+		t.Fatalf("running fallback = %q", got)
+	}
+	release()
+	waitJob(t, opt.stageQ, window.KindImage, window.StatusReady)
+	if got := handoffFallback(opt, slot); !strings.Contains(got, "ready on the stage window") {
+		t.Fatalf("ready fallback = %q", got)
+	}
+}

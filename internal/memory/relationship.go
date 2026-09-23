@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,9 +178,37 @@ func (s *RelationshipStore) ForJudge() []string {
 	return out
 }
 
+// Observed is one judged turn as the ledger sees it.
+type Observed struct {
+	User        string
+	Assistant   string
+	UserEmotion string
+	SelfEmotion string
+	Mode        string
+	// Intent is the judged conversational move. Requests, goodbyes, and
+	// backchannels do not become the last topic.
+	Intent string
+	// Task marks a turn that asks her to do something now. The runtime
+	// tracks its progress, so the ledger does not keep it as a loop.
+	Task       bool
+	Valence    float64
+	Arousal    float64
+	Engagement float64
+	PersonaFit float64
+}
+
 // ObserveTurn folds a judged turn into the persistent relationship.
 func (s *RelationshipStore) ObserveTurn(personaName, userText, assistantText string, userEmotion, selfEmotion, mode string,
 	userValence, userArousal, engagement, personaFit float64) (Relationship, error) {
+	return s.Observe(personaName, Observed{
+		User: userText, Assistant: assistantText,
+		UserEmotion: userEmotion, SelfEmotion: selfEmotion, Mode: mode,
+		Valence: userValence, Arousal: userArousal, Engagement: engagement, PersonaFit: personaFit,
+	})
+}
+
+// Observe folds a judged turn into the persistent relationship.
+func (s *RelationshipStore) Observe(personaName string, t Observed) (Relationship, error) {
 	if s == nil {
 		return defaultRelationship(), nil
 	}
@@ -188,11 +217,12 @@ func (s *RelationshipStore) ObserveTurn(personaName, userText, assistantText str
 
 	r := normalizeRelationship(s.rel)
 	now := time.Now()
+	relax(&r, now)
 	r.UpdatedAt = now
 
 	// Relationship grows slowly; big jumps feel fake and robotic.
 	delta := 0.0
-	switch mode {
+	switch t.Mode {
 	case "celebrate":
 		delta += 0.03
 	case "comfort":
@@ -202,30 +232,34 @@ func (s *RelationshipStore) ObserveTurn(personaName, userText, assistantText str
 	case "re_engage":
 		delta += 0.008
 	}
-	if userValence > 0.6 {
+	if t.Valence > 0.6 {
 		delta += 0.01
 	}
-	if engagement > 0.65 {
+	if t.Engagement > 0.65 {
 		delta += 0.01
 	}
-	if personaFit > 0.6 {
+	if t.PersonaFit > 0.6 {
 		delta += 0.008
 	}
-	if userValence < 0.35 && mode != "safety" {
+	if t.Valence < 0.35 && t.Mode != "safety" {
 		r.Tension = clamp01(r.Tension + 0.02)
 	}
-	if mode == "safety" {
+	if t.Mode == "safety" {
 		r.Tension = clamp01(r.Tension + 0.04)
 	}
 
-	r.Bond = clamp01(r.Bond + delta)
-	r.Trust = clamp01(r.Trust + delta*0.8)
-	r.Warmth = clamp01(r.Warmth + delta*0.6)
-	if userValence < 0.3 {
-		r.Warmth = clamp01(r.Warmth - 0.01)
+	// Each turn closes part of the remaining gap, so closeness keeps
+	// moving near the top instead of pinning at 1.
+	r.Bond = clamp01(r.Bond + delta*(1-r.Bond))
+	r.Trust = clamp01(r.Trust + delta*0.8*(1-r.Trust))
+	if t.Mode == "de_escalate" {
+		r.Trust = clamp01(r.Trust - 0.01)
 	}
+	// Warmth is how this stretch feels: it follows the turn and settles
+	// back, where bond only accumulates.
+	r.Warmth = clamp01(r.Warmth + 0.15*(warmthTarget(r.Bond, t.Mode, t.Valence)-r.Warmth))
 
-	if mode == "de_escalate" || mode == "safety" {
+	if t.Mode == "de_escalate" || t.Mode == "safety" {
 		r.Tension = clamp01(r.Tension + 0.025)
 	} else {
 		r.Tension = clamp01(r.Tension - 0.015)
@@ -234,18 +268,80 @@ func (s *RelationshipStore) ObserveTurn(personaName, userText, assistantText str
 	// Numbers move every turn. Text is a gist, and only when the
 	// utterance is actually a promise, a loop, a joke, or a mood shift.
 	// Safety does not write a quote of the distress into the ledger.
-	settle(&r, userText, now)
-	if mode != "safety" {
-		seed(&r, userText, mode, now)
+	settle(&r, t.User, now)
+	if t.Mode != "safety" && !t.Task {
+		seed(&r, t.User, t.Mode, now)
 	}
-	if topic := topicOf(userText); topic != "" {
-		r.LastTopic = topic
+	if !t.Task && topicIntent(t.Intent) {
+		if topic := topicOf(t.User); topic != "" {
+			r.LastTopic = topic
+		}
 	}
 
-	r.Stage = stageForBond(r.Bond, r.Trust, r.Warmth)
-	r.LastEvent = lastNonEmpty(modeLabel(mode), r.LastEvent)
+	r.Stage = nextStage(r.Stage, r.Bond, r.Trust, r.Warmth)
+	r.LastEvent = lastNonEmpty(modeLabel(t.Mode), r.LastEvent)
 	s.rel = normalizeRelationship(r)
 	return cloneRelationship(s.rel), s.saveLocked()
+}
+
+const (
+	// bondFloor is what weeks apart leave of a bond that was built.
+	bondFloor = 0.2
+	// Half-lives of time apart, in days.
+	bondHalfLife    = 45
+	trustHalfLife   = 90
+	warmthHalfLife  = 2
+	tensionHalfLife = 2
+)
+
+// relax applies the time since the last turn: warmth and tension settle
+// within days, bond and trust fade over weeks and keep a floor.
+func relax(r *Relationship, now time.Time) {
+	if r.UpdatedAt.IsZero() {
+		return
+	}
+	days := now.Sub(r.UpdatedAt).Hours() / 24
+	if days < 0.5 {
+		return
+	}
+	half := func(v, rest, life float64) float64 {
+		return rest + (v-rest)*math.Pow(0.5, days/life)
+	}
+	if r.Bond > bondFloor {
+		r.Bond = half(r.Bond, bondFloor, bondHalfLife)
+	}
+	if r.Trust > bondFloor {
+		r.Trust = half(r.Trust, bondFloor, trustHalfLife)
+	}
+	r.Warmth = half(r.Warmth, 0.25+0.35*r.Bond, warmthHalfLife)
+	r.Tension = half(r.Tension, 0, tensionHalfLife)
+}
+
+// warmthTarget is where warmth drifts on this turn: closer people start
+// warmer, and the turn's own mood pulls it up or down.
+func warmthTarget(bond float64, mode string, valence float64) float64 {
+	w := 0.3 + 0.4*bond + 0.3*(valence-0.5)
+	switch mode {
+	case "celebrate":
+		w += 0.2
+	case "comfort":
+		w += 0.1
+	case "de_escalate":
+		w -= 0.2
+	case "re_engage":
+		w -= 0.05
+	}
+	return clamp01(w)
+}
+
+// topicIntent reports whether a turn with this intent is talk about
+// something. An unknown intent keeps the older behavior.
+func topicIntent(intent string) bool {
+	switch intent {
+	case "request", "goodbye", "withdraw":
+		return false
+	}
+	return true
 }
 
 func (s *RelationshipStore) saveLocked() error {
@@ -286,16 +382,34 @@ func summarizeRelationship(r Relationship, query string, now time.Time) string {
 	if xs := pick(r.Promises, query, now, 1); len(xs) > 0 {
 		parts = append(parts, "答应过: "+strings.Join(xs, " / "))
 	}
-	if t := strings.TrimSpace(r.LastTopic); t != "" {
+	// The last topic is usually the line just said; a turn's recall
+	// would hand her own conversation back to her as a memory.
+	if t := strings.TrimSpace(r.LastTopic); t != "" && strings.TrimSpace(query) == "" {
 		parts = append(parts, "上次说到: "+clipRunes(t, 24))
 	}
 	if r.Tension >= 0.45 {
 		parts = append(parts, "你们之间还有一点没消的别扭")
 	}
 	if len(parts) == 0 {
-		return "现在还在彼此试探，像刚认识的同桌"
+		if strings.TrimSpace(query) != "" {
+			return ""
+		}
+		return stageLine(r.Stage)
 	}
 	return strings.Join(parts, "；")
+}
+
+func stageLine(stage string) string {
+	switch stage {
+	case relationshipStageBonded:
+		return "很亲近了，不用客套"
+	case relationshipStageTrusted:
+		return "彼此信得过，可以说点真心话"
+	case relationshipStageFamiliar:
+		return "已经聊熟了，说话可以随意一点"
+	default:
+		return "现在还在彼此试探，像刚认识的同桌"
+	}
 }
 
 func modeLabel(mode string) string {
@@ -314,6 +428,34 @@ func modeLabel(mode string) string {
 		return "把事往前推"
 	default:
 		return "继续聊"
+	}
+}
+
+// nextStage moves up as soon as the numbers allow, and down only once
+// they sit clearly below the current stage, so one sour stretch does
+// not flip how close they are.
+func nextStage(cur string, bond, trust, warmth float64) string {
+	raw := stageForBond(bond, trust, warmth)
+	if stageRank(raw) >= stageRank(cur) {
+		return raw
+	}
+	const margin = 0.06
+	if stageRank(stageForBond(bond+margin, trust+margin, warmth+margin)) >= stageRank(cur) {
+		return cur
+	}
+	return raw
+}
+
+func stageRank(stage string) int {
+	switch stage {
+	case relationshipStageBonded:
+		return 3
+	case relationshipStageTrusted:
+		return 2
+	case relationshipStageFamiliar:
+		return 1
+	default:
+		return 0
 	}
 }
 
