@@ -824,6 +824,19 @@ func (s *capabilitySlot) setNote(note string) {
 	s.mu.Unlock()
 }
 
+// noteFor sets the note only while kind is still the open branch, so a
+// late look does not overwrite the branch that replaced it.
+func (s *capabilitySlot) noteFor(kind, note string) {
+	if s == nil || kind == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.kind == kind {
+		s.note = strings.TrimSpace(note)
+	}
+	s.mu.Unlock()
+}
+
 func (s *capabilitySlot) setHold(v string) {
 	if s == nil {
 		return
@@ -1153,6 +1166,9 @@ func branchSteer(br judge.Branch, jd *judge.Judgment, mode string) string {
 	if jd != nil && br.Open() && jd.BranchDone(judge.DefaultBranchDone) && !leaving {
 		return " The task you were on is finished. You may say so in one short line. Do not invent extra results."
 	}
+	if br.Open() && !leaving && isLook(br.Kind) {
+		return " You are looking at the " + br.Kind + " with them. Answer from the latest " + br.Kind + " note only; if it does not show what they ask, say so."
+	}
 	if br.Open() && !leaving {
 		note := " You are still on " + br.Kind + ". Goal: " + clip(br.Goal, 120) + "."
 		if br.Note != "" {
@@ -1255,11 +1271,17 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 			return
 		}
 	}
+	// owned is work that answers this handoff itself when it lands.
+	owned := false
 	if continuing {
 		slot.follow(userText)
 		opt.log("[branch] stay %s", act)
-		// Re-runs answer for themselves; a queued job or a busy run does not.
-		defer settle(handoffGrace)
+		// Anything else gets a status answer after a short grace.
+		defer func() {
+			if !owned {
+				settle(handoffGrace)
+			}
+		}()
 	} else {
 		if !handoff {
 			opt.voice.retireAnswered()
@@ -1302,11 +1324,11 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 			opt.log("[self] %s follow-up, no new stretch", act)
 		}
 	case judge.ActCamera:
-		startSight(ctx, opt, p, sess, eye.SourceCamera, continuing, userText)
+		owned = lookAgain(continuing, handoff, userText) && startSight(ctx, opt, p, sess, slot, eye.SourceCamera, continuing, userText)
 	case judge.ActScreen:
-		startSight(ctx, opt, p, sess, eye.SourceScreen, continuing, userText)
+		owned = lookAgain(continuing, handoff, userText) && startSight(ctx, opt, p, sess, slot, eye.SourceScreen, continuing, userText)
 	case judge.ActShot:
-		startSight(ctx, opt, p, sess, eye.SourceShot, continuing, userText)
+		owned = lookAgain(continuing, handoff, userText) && startSight(ctx, opt, p, sess, slot, eye.SourceShot, continuing, userText)
 	case judge.ActDivine:
 		ensureDivine(ctx, opt, p, lc, sess, slot, userText, continuing)
 	case judge.ActPlan:
@@ -1607,33 +1629,50 @@ func runPercept(ctx context.Context, opt Options, lc *llm.Client, sess *livevoic
 	slot.close()
 }
 
-func startSight(ctx context.Context, opt Options, p *persona.Persona, sess *livevoice.Session, source string, again bool, question string) {
-	if again && !eye.AsksScene(question) {
-		return
-	}
+// startSight takes one look for this turn and reports whether it started.
+// A turn she handed off is answered on that delegation with what she saw:
+// she said a filler and is waiting for it. Any other look stays quiet
+// reference, so one ask is not spoken twice.
+func startSight(ctx context.Context, opt Options, p *persona.Persona, sess *livevoice.Session, slot *capabilitySlot,
+	source string, again bool, userText string) bool {
 	if opt.eyes == nil {
 		opt.log("[act] %s unavailable", source)
 		voiceNudge(opt, sess, sightMiss(source))
-		return
+		return false
 	}
-	if again {
-		voiceSteer(opt, sess, "They asked something new about this look. A fresh note is coming. Do not answer from the previous description.")
+	kind, goal, _ := slot.current()
+	question := lookAsk(goal, userText)
+	bound := ""
+	if opt.voice.handoffTurn(userText) {
+		bound = opt.voice.delegation()
 	}
+	slot.noteFor(kind, lookPending)
 	go func() {
-		g := opt.eyes.GlanceAsk(ctx, source, question)
+		look := opt.eyes.GlanceAsk
+		if again {
+			look = opt.eyes.LookCloser
+		}
+		g := look(ctx, source, question)
 		if ctx.Err() != nil {
 			return
 		}
 		opt.log("[act] %s %s", source, clip(g.Caption, 80))
+		slot.noteFor(kind, lookDone)
+		spoke := sightSpoke(source, g.Ready && strings.TrimSpace(g.Caption) != "", again, userText)
+		felt := ""
+		if opt.sense != nil {
+			felt = opt.sense.Felt(p, sense.Ask{Kind: sightAsk(source)}, source)
+		}
+		if felt == "" && strings.TrimSpace(g.Caption) != "" {
+			felt = "What the " + source + " showed: " + g.Caption
+		}
 		// One append only: the gateway may start a line on the first one,
 		// and a second append landing mid-line cuts it off.
-		spoke := nudgeLead + sightSpoke(source, g.Ready && strings.TrimSpace(g.Caption) != "", again, question)
-		note := spoke
-		if opt.sense != nil {
-			if felt := opt.sense.Felt(p, sense.Ask{Kind: sightAsk(source)}, source); felt != "" {
-				note = livevoice.FitTail(felt + "\n" + spoke)
-			}
+		if id := lookAnswers(opt.voice, bound, userText); id != "" {
+			voiceAnswer(opt, sess, id, "commentary", livevoice.FitTail(strings.TrimSpace(felt+"\n"+spoke)))
+			return
 		}
+		note := livevoice.FitTail(strings.TrimSpace(felt + "\n" + nudgeLead + spoke))
 		live := opt.voice.live(sess)
 		if live == nil {
 			opt.log("[act] %s steer skipped", source)
@@ -1643,7 +1682,74 @@ func startSight(ctx context.Context, opt Options, p *persona.Persona, sess *live
 			opt.log("[act] %s steer failed: %v", source, err)
 		}
 	}()
+	return true
 }
+
+// lookAgain reports whether this turn takes a fresh look. A follow-up
+// looks again when she handed it off or it asks what the view shows;
+// a backchannel on an open look does not.
+func lookAgain(continuing, handoff bool, userText string) bool {
+	return !continuing || handoff || eye.AsksScene(userText)
+}
+
+// lookAnswers is the delegation a finished look replies on: the one bound
+// when it started, or one the gateway raised for this same utterance after
+// dispatch. A newer handoff for another ask gets nothing.
+func lookAnswers(h *voiceHold, bound, userText string) string {
+	id := bound
+	if id == "" && h.handoffTurn(userText) {
+		id = h.delegation()
+	}
+	if id == "" || h.delegation() != id {
+		return ""
+	}
+	return id
+}
+
+// lookAsk is what a look should answer: the latest lines of this branch,
+// newest last, so a short follow-up keeps what it points at.
+func lookAsk(goal, userText string) string {
+	cur := strings.Join(strings.Fields(userText), " ")
+	var lines []string
+	for _, l := range strings.Split(goal, "\n") {
+		if l = strings.Join(strings.Fields(l), " "); l != "" && l != cur {
+			lines = append(lines, l)
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	if len(lines) > lookAskLines {
+		lines = lines[len(lines)-lookAskLines:]
+	}
+	q := []rune(strings.Join(lines, "；"))
+	if len(q) > lookAskRunes {
+		q = q[len(q)-lookAskRunes:]
+	}
+	return string(q)
+}
+
+// isLook is a branch that only looks: the camera, the screen, or her own shot.
+func isLook(kind string) bool {
+	return kind == judge.ActCamera || kind == judge.ActScreen || kind == judge.ActShot
+}
+
+// lookFallback answers a handoff on an open look that got no fresh note.
+func lookFallback(kind, note string) string {
+	if note == lookPending {
+		return "You are still looking at the " + kind + " for this; nothing is back yet. Say so in one short in-character line. Do not describe it yet."
+	}
+	return "Nothing new was looked at for this. Answer from your last " + kind + " note in one short in-character line. If it does not show what they ask, say you cannot tell from it. Do not claim you looked again."
+}
+
+const (
+	// lookPending and lookDone are a look branch's note while the eye is out, and after.
+	lookPending = "looking"
+	lookDone    = "looked"
+	// lookAskLines and lookAskRunes keep a look's question inside the eye prompt.
+	lookAskLines = 3
+	lookAskRunes = 80
+)
 
 func sightAsk(source string) string {
 	switch source {
@@ -1672,7 +1778,7 @@ func sightSpoke(source string, ready, again bool, question string) string {
 		return "The screenshot of yourself did not arrive. Say so in one short in-character line. Do not invent how you look. Do not describe the camera or the desktop."
 	}
 	q := strings.TrimSpace(question)
-	if eye.AsksScene(q) {
+	if q != "" && (again || eye.AsksScene(q)) {
 		lead := "You just looked. "
 		if again {
 			lead = "This is a new look for their follow-up. "
@@ -1754,6 +1860,7 @@ func voiceAnswer(opt Options, sess *livevoice.Session, id, channel, text string)
 		opt.log("[answer] failed: %v", err)
 	} else {
 		opt.voice.markAnswered(id)
+		opt.log("[answer] %s", channel)
 	}
 }
 
@@ -1778,6 +1885,9 @@ func handoffFallback(opt Options, slot *capabilitySlot) string {
 	kind, _, note := slot.current()
 	if kind == "" {
 		return delegAck
+	}
+	if isLook(kind) {
+		return lookFallback(kind, note)
 	}
 	status := stageStatus(opt, note)
 	if status == "" && slot.busy() {

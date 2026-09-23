@@ -3,6 +3,7 @@ package eye
 import (
 	"context"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jingx8885/lov-evo/internal/jev"
 )
@@ -111,6 +112,8 @@ func describePrompt(source, question string) (system, user string) {
 func picturePrompt(question string) (system, user string) {
 	system = "You answer one question about a single computer screenshot for a voice companion. " +
 		"One or two short Chinese sentences. Count only people and objects you can see. " +
+		"If they ask what it says, quote the few visible words they point at. " +
+		"The question may carry their earlier lines, separated by ；, newest last. " +
 		"If you cannot tell, say you cannot tell. Do not invent. " +
 		"This is the desktop, not a room camera, and not a Live2D face."
 	user = "Question: " + clipQuestion(question)
@@ -130,6 +133,9 @@ func clipCaption(s string, n int) string {
 	s = strings.Join(strings.Fields(s), " ")
 	if n <= 0 || len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "…"
 }

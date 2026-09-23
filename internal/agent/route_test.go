@@ -531,6 +531,51 @@ func TestHandoffStaysBoundToItsTurn(t *testing.T) {
 	}
 }
 
+func TestHandedOffLookFollowUpLooksAgain(t *testing.T) {
+	looks := &lookLog{}
+	opt, slot, _ := routeRig(t, looks)
+	run := func(jd *judge.Judgment) {
+		dispatchCapability(context.Background(), opt, routePersona(), nil, nil, memory.New(4), routePlanner(nil), nil, slot, jd, "continue", jd.UserText, true)
+	}
+	looked := func() bool {
+		_, _, note := slot.current()
+		return note == lookDone
+	}
+	run(parsedTurn("看看屏幕", "request", "neutral", judge.ActScreen, "", 0))
+	waitUntil(t, time.Second, looked)
+	run(parsedTurn("那个看看fit ui吧", "request", "neutral", judge.ActScreen, "", 0))
+	if !looked() || looks.count("screen") != 1 {
+		t.Fatalf("a follow-up she answered herself looked again: %v", looks.snapshot())
+	}
+	opt.voice.setDelegation("del_up", "嗯...上面的部分呗")
+	run(parsedTurn("嗯...上面的部分呗", "request", "neutral", judge.ActScreen, "", 0))
+	waitUntil(t, time.Second, func() bool { return looks.count("screen") == 2 && looked() })
+	if got := lookAnswers(opt.voice, "", "嗯...上面的部分呗"); got != "del_up" {
+		t.Fatalf("the look would answer %q", got)
+	}
+}
+
+func TestLookFallbackSaysWhatTheEyeDid(t *testing.T) {
+	opt, slot, _ := routeRig(t, nil)
+	slot.open(judge.ActScreen, "看看屏幕")
+	slot.noteFor(judge.ActScreen, lookPending)
+	if got := handoffFallback(opt, slot); !strings.Contains(got, "still looking") || strings.Contains(got, "they asked for") {
+		t.Fatalf("pending look fallback = %q", got)
+	}
+	slot.noteFor(judge.ActScreen, lookDone)
+	if got := handoffFallback(opt, slot); !strings.Contains(got, "Nothing new was looked at") {
+		t.Fatalf("finished look fallback = %q", got)
+	}
+	steer := branchSteer(slot.snapshot(), parsedTurn("嗯...上面的部分呗", "request", "neutral", judge.ActScreen, "", 0), "continue")
+	if strings.Contains(steer, "not finished") || !strings.Contains(steer, "latest screen note") {
+		t.Fatalf("look steer = %q", steer)
+	}
+	slot.noteFor(judge.ActImage, "image queued j1")
+	if _, _, note := slot.current(); note != lookDone {
+		t.Fatal("a late note for another kind overwrote the open look")
+	}
+}
+
 func TestHandoffFallbackSaysWhatIsTrue(t *testing.T) {
 	opt, slot, release := routeRig(t, nil)
 	defer release()

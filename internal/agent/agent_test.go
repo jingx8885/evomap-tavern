@@ -20,6 +20,42 @@ func TestSightFollowUpNamesTheQuestion(t *testing.T) {
 	if strings.Contains(plain, "follow-up") || strings.Contains(plain, "你好") {
 		t.Fatalf("plain look %q", plain)
 	}
+	part := sightSpoke(eye.SourceScreen, true, true, "嗯...上面的部分呗")
+	if !strings.Contains(part, "上面的部分") {
+		t.Fatalf("a follow-up look re-described instead of answering: %q", part)
+	}
+}
+
+func TestLookAnswersOnlyItsOwnHandoff(t *testing.T) {
+	h := &voiceHold{}
+	h.setDelegation("d1", "看看屏幕上写了什么")
+	if got := lookAnswers(h, "d1", "看看屏幕上写了什么"); got != "d1" {
+		t.Fatalf("bound look answers %q", got)
+	}
+	if got := lookAnswers(h, "", "看看屏幕上写了什么"); got != "d1" {
+		t.Fatalf("a handoff raised after dispatch was missed: %q", got)
+	}
+	h.setDelegation("d2", "帮我打开记事本")
+	if got := lookAnswers(h, "d1", "看看屏幕上写了什么"); got != "" {
+		t.Fatalf("an old look answered a newer ask: %q", got)
+	}
+	if got := lookAnswers(h, "", "看看屏幕上写了什么"); got != "" {
+		t.Fatalf("an unbound look took another ask's handoff: %q", got)
+	}
+}
+
+func TestLookAskKeepsWhatAFollowUpPointsAt(t *testing.T) {
+	got := lookAsk("可以擦看文字吗\nCursor 的页面,然后你看上面有什么字\n嗯...上面的部分呗", "嗯...上面的部分呗")
+	if got != "可以擦看文字吗；Cursor 的页面,然后你看上面有什么字；嗯...上面的部分呗" {
+		t.Fatalf("thread %q", got)
+	}
+	long := lookAsk(strings.Repeat("很长的一句话", 30), "上面呢")
+	if len([]rune(long)) > lookAskRunes || !strings.HasSuffix(long, "上面呢") {
+		t.Fatalf("long thread %q", long)
+	}
+	if lookAsk("", "看看屏幕") != "看看屏幕" {
+		t.Fatal("a first look asks its own line")
+	}
 }
 
 func TestJudgeWorthSkipsNoiseAndFragments(t *testing.T) {

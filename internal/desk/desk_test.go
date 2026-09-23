@@ -204,6 +204,11 @@ func TestCodexExecArgsUsesLuna(t *testing.T) {
 	if got[len(got)-1] != "fix the bug" {
 		t.Fatalf("prompt last: %q", got[len(got)-1])
 	}
+	for _, a := range got {
+		if a == "-s" || a == "--sandbox" {
+			t.Fatalf("codex rejects --sandbox with --approve-for-me: %v", got)
+		}
+	}
 }
 
 func TestRunDirectCodexSkipsJev(t *testing.T) {

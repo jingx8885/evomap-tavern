@@ -122,10 +122,11 @@ func CodexExecArgs(cwd, model, prompt string) []string {
 	if strings.TrimSpace(model) == "" {
 		model = config.DefaultPlannerModel
 	}
+	// --approve-for-me already runs in the workspace-write sandbox; the
+	// CLI rejects -s/--sandbox next to it.
 	return []string{
 		"exec",
 		"-C", cwd,
-		"-s", "workspace-write",
 		"--skip-git-repo-check",
 		"--approve-for-me",
 		"-m", model,

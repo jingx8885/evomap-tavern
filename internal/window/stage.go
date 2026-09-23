@@ -260,9 +260,9 @@ func (s *Stage) Enqueue(kind, prompt string) Job {
 	s.mu.Lock()
 	s.seq++
 	job := Job{
-		ID:     fmt.Sprintf("j%d", s.seq),
-		Kind:   kind,
-		Prompt: prompt,
+		ID:      fmt.Sprintf("j%d", s.seq),
+		Kind:    kind,
+		Prompt:  prompt,
 		Status:  StatusQueued,
 		Detail:  "queued",
 		Created: nowMS(),
@@ -473,6 +473,11 @@ func (s *Stage) execute(ctx context.Context, job Job) {
 		j.File = file
 		j.Text = text
 	})
+	// A result that just landed takes the right frame. A newer job that is
+	// only queued does not push aside one still in flight.
+	if ctx.Err() == nil {
+		s.feature = job.ID
+	}
 	for _, j := range s.jobs {
 		if j.ID == job.ID {
 			s.deliverLocked(j)

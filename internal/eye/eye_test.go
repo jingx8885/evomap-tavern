@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jingx8885/lov-evo/internal/jev"
 )
@@ -217,6 +218,48 @@ func TestAsksScene(t *testing.T) {
 	}
 	if AsksScene("哈哈你好搞笑") || AsksScene("看看屏幕") || AsksScene("看看摄像头") || AsksScene("") {
 		t.Fatal("chat and a plain look are not a picture question")
+	}
+	for _, q := range []string{"可以擦看文字吗", "Cursor 的页面,然后你看上面有什么字", "上面写的什么"} {
+		if !AsksScene(q) {
+			t.Fatalf("asking what it says needs the picture: %q", q)
+		}
+	}
+}
+
+func TestScreenFollowUpTakesPicture(t *testing.T) {
+	var caps atomic.Int32
+	var asked string
+	e := New(Options{
+		Observe: func(context.Context) (ScreenView, error) {
+			return ScreenView{Caption: "前台 Cursor"}, nil
+		},
+		Capture: func(context.Context) ([]byte, error) {
+			caps.Add(1)
+			return SolidJPEG(32, 24, color.White), nil
+		},
+		LLM: fakeVision{fn: func(_ context.Context, _, user string, _ []byte) (string, error) {
+			asked = user
+			return "上面写着 Memory and task module issues。", nil
+		}},
+	})
+	plain := e.GlanceAsk(context.Background(), SourceScreen, "嗯...上面的部分呗")
+	if caps.Load() != 0 || strings.Contains(plain.Caption, "画面") {
+		t.Fatalf("a first look without a picture question took one: %q", plain.Caption)
+	}
+	closer := e.LookCloser(context.Background(), SourceScreen, "你看上面有什么字；嗯...上面的部分呗")
+	if caps.Load() != 1 || !strings.Contains(closer.Caption, "Memory and task") || !strings.Contains(asked, "上面的部分") {
+		t.Fatalf("follow-up look %q caps=%d asked=%q", closer.Caption, caps.Load(), asked)
+	}
+	e.LookCloser(context.Background(), SourceScreen, "")
+	if caps.Load() != 1 {
+		t.Fatal("a follow-up with no question took a picture")
+	}
+}
+
+func TestClipCaptionKeepsWholeRunes(t *testing.T) {
+	got := clipCaption(strings.Repeat("字", 100), 181)
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, "…") {
+		t.Fatalf("clip split a rune: %q", got)
 	}
 }
 

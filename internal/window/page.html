@@ -57,7 +57,9 @@
   #frame.layout-queue #column { border-right: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); align-content: start; }
   .empty { color: var(--muted); padding: 24px 8px; text-align: center; }
 
-  .card { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; background: var(--card); transition: border-color .2s; }
+  .card { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; background: var(--card); transition: border-color .2s; cursor: pointer; }
+  .card:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+  .card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .card.on { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
   .card.canceled, .card.failed { opacity: .72; }
   .head { display: flex; align-items: center; gap: 6px; font-size: 12px; }
@@ -171,8 +173,25 @@
       return h;
     }
 
+    function pick(id) {
+      if (!lastDoc || !lastDoc.view || lastDoc.view.feature === id) return;
+      lastDoc.view.feature = id;
+      last = "";
+      paint(lastDoc);
+      fetch("/api/feature", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: id })
+      }).catch(function () {});
+    }
     function makeCard(job) {
       var c = el("article", "card");
+      c.tabIndex = 0;
+      c.setAttribute("role", "button");
+      c.addEventListener("click", function () { pick(job.id); });
+      c.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(job.id); }
+      });
       c.appendChild(head(job));
       c._prompt = c.appendChild(el("div", "prompt"));
       c._thumb = c.appendChild(el("img", "thumb"));
@@ -189,6 +208,9 @@
     function updateCard(c, job, on) {
       c.className = "card " + job.status + (on ? " on" : "");
       c.title = job.prompt || "";
+      c.setAttribute("aria-label", (KIND[job.kind] || job.kind) + " " + job.id + " " + (STATUS[job.status] || job.status));
+      if (on) c.setAttribute("aria-current", "true");
+      else c.removeAttribute("aria-current");
       c.querySelector(".pill").textContent = STATUS[job.status] || job.status;
       c._prompt.textContent = job.prompt || "";
       var thumb = job.kind === "image" && job.status === "ready" && job.file ? media(job.file) : "";

@@ -87,6 +87,16 @@ func (e *Eyes) Glance(ctx context.Context, source string) Glimpse {
 // generic caption. A scene question is answered from a fresh frame,
 // not from the previous caption.
 func (e *Eyes) GlanceAsk(ctx context.Context, source, question string) Glimpse {
+	return e.look(ctx, source, question, AsksScene(question))
+}
+
+// LookCloser answers a follow-up on an open look. The screen takes a
+// picture too: its window titles were already the first answer.
+func (e *Eyes) LookCloser(ctx context.Context, source, question string) Glimpse {
+	return e.look(ctx, source, question, strings.TrimSpace(question) != "")
+}
+
+func (e *Eyes) look(ctx context.Context, source, question string, picture bool) Glimpse {
 	if e == nil {
 		return Glimpse{}
 	}
@@ -96,7 +106,7 @@ func (e *Eyes) GlanceAsk(ctx context.Context, source, question string) Glimpse {
 	case SourceShot:
 		return e.glanceShot(ctx, question)
 	case SourceScreen:
-		e.refreshScreen(ctx, question)
+		e.refreshScreen(ctx, question, picture)
 		return e.Snapshot().Screen
 	default:
 		return Glimpse{}
@@ -180,7 +190,7 @@ func (e *Eyes) waitFrame(ctx context.Context, source string, after time.Time, d 
 	}
 }
 
-func (e *Eyes) refreshScreen(ctx context.Context, question string) {
+func (e *Eyes) refreshScreen(ctx context.Context, question string, picture bool) {
 	view, err := e.observe(ctx)
 	if err != nil {
 		e.log("screen: %v", err)
@@ -196,7 +206,7 @@ func (e *Eyes) refreshScreen(ctx context.Context, question string) {
 	if g.Caption == "" {
 		g.Caption = "桌面窗口快照还是空的"
 	}
-	if !view.Private && AsksScene(question) {
+	if !view.Private && picture {
 		pic, picErr := e.picture(ctx, question)
 		switch {
 		case picErr != nil || pic == "":

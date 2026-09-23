@@ -92,6 +92,75 @@ func TestCancelQueuedJob(t *testing.T) {
 	}
 }
 
+func TestFinishedJobTakesTheFrame(t *testing.T) {
+	release := make(chan struct{})
+	st := NewStage(StageOptions{
+		Runner: func(ctx context.Context, kind, prompt string, report func(string, float64)) (string, string, error) {
+			<-release
+			return kind + ".bin", "", nil
+		},
+	})
+	defer st.Close()
+	image := st.Enqueue(KindImage, "a cat")
+	video := st.Enqueue(KindVideo, "the cat walks")
+	if got := st.QueueView(true, "").Feature; got != image.ID {
+		t.Fatalf("a queued job took the frame from one in flight: %s", got)
+	}
+	close(release)
+	if _, err := st.Wait(context.Background(), video.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.QueueView(true, "").Feature; got != video.ID {
+		t.Fatalf("the finished video is not in the frame: %s", got)
+	}
+}
+
+func TestCardClickFeaturesJob(t *testing.T) {
+	st := NewStage(StageOptions{
+		Runner: func(ctx context.Context, kind, prompt string, report func(string, float64)) (string, string, error) {
+			return kind + ".bin", "", nil
+		},
+	})
+	defer st.Close()
+	reg := New(Options{})
+	reg.Register(st)
+	first := st.Enqueue(KindImage, "a cat")
+	second := st.Enqueue(KindVideo, "the cat walks")
+	if _, err := st.Wait(context.Background(), second.ID); err != nil {
+		t.Fatal(err)
+	}
+	post := func(body, origin string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/feature", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		rec := httptest.NewRecorder()
+		reg.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if code := post(`{"id":"`+first.ID+`"}`, "http://example.com"); code != http.StatusNoContent {
+		t.Fatalf("click status %d", code)
+	}
+	if got := st.QueueView(true, "").Feature; got != first.ID {
+		t.Fatalf("click did not feature %s: %s", first.ID, got)
+	}
+	if code := post(`{"id":"`+second.ID+`"}`, "http://evil.test"); code != http.StatusForbidden {
+		t.Fatalf("another origin got %d", code)
+	}
+	if code := post(`{"id":"j404"}`, ""); code != http.StatusBadRequest {
+		t.Fatalf("unknown job got %d", code)
+	}
+	rec := httptest.NewRecorder()
+	reg.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/feature", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET got %d", rec.Code)
+	}
+	if got := st.QueueView(true, "").Feature; got != first.ID {
+		t.Fatalf("a refused request moved the frame to %s", got)
+	}
+}
+
 func waitStatus(st *Stage, id, status string) <-chan struct{} {
 	ch := make(chan struct{})
 	go func() {

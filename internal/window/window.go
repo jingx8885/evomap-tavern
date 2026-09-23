@@ -353,8 +353,34 @@ func (r *Registry) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", r.servePage)
 	mux.HandleFunc("/api/desktop", r.serveDesktop)
+	mux.HandleFunc("/api/feature", r.serveFeature)
 	mux.HandleFunc("/media/", r.serveMedia)
 	return mux
+}
+
+// serveFeature is a click on a card: that job goes to the right frame.
+// Only this page may ask; another origin is refused.
+func (r *Registry) serveFeature(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if o := req.Header.Get("Origin"); o != "" && o != "http://"+req.Host {
+		http.Error(w, "cross-origin", http.StatusForbidden)
+		return
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 1<<10)).Decode(&body); err != nil || strings.TrimSpace(body.ID) == "" {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return
+	}
+	if _, err := r.Apply("", OpFeature, body.ID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (r *Registry) servePage(w http.ResponseWriter, req *http.Request) {
