@@ -120,15 +120,15 @@ func openWinmmPlayer() *Player {
 	in := make(chan []byte, 256)
 	stopCh := make(chan struct{})
 	done := make(chan struct{})
+	p := &Player{kind: "winmm"}
 	go func() {
 		defer close(done)
 		if hasEvent {
 			defer windows.CloseHandle(event)
 		}
-		winmmLoop(hwo, in, stopCh, event)
+		winmmLoop(p, hwo, in, stopCh, event)
 	}()
 
-	p := &Player{kind: "winmm"}
 	p.stream = func(pcm []byte) {
 		if len(pcm) == 0 {
 			return
@@ -145,15 +145,18 @@ func openWinmmPlayer() *Player {
 		}
 		select {
 		case in <- cp:
+			p.queued.Add(int64(len(cp)))
 			return
 		default:
 		}
 		select {
-		case <-in:
+		case old := <-in:
+			p.queued.Add(-int64(len(old)))
 		default:
 		}
 		select {
 		case in <- cp:
+			p.queued.Add(int64(len(cp)))
 		case <-stopCh:
 		default:
 		}
@@ -179,7 +182,7 @@ type winmmOutBuf struct {
 	prepared bool
 }
 
-func winmmLoop(hwo uintptr, in <-chan []byte, stop <-chan struct{}, event windows.Handle) {
+func winmmLoop(p *Player, hwo uintptr, in <-chan []byte, stop <-chan struct{}, event windows.Handle) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	thread, _, _ := procGetCurrentThread.Call()
@@ -222,10 +225,13 @@ func winmmLoop(hwo uintptr, in <-chan []byte, stop <-chan struct{}, event window
 		// next phrase does not sit through another prebuffer (that restart
 		// is the chop between words).
 		if cue.ready(len(acc), winmmAnyBusy(bufs), time.Now(), winmmSrcFrameBytes, winmmPrimeBytes) {
+			before := len(acc)
 			if err := winmmFill(hwo, bufs, &acc); err != nil {
 				return
 			}
+			p.queued.Add(-int64(before - len(acc)))
 		}
+		p.busy.Store(int64(winmmBusyCount(bufs)))
 		select {
 		case <-stop:
 			return
@@ -238,6 +244,7 @@ func winmmLoop(hwo uintptr, in <-chan []byte, stop <-chan struct{}, event window
 			if len(acc) > winmmMaxAccBytes {
 				// Pathological backlog only. A normal TTS burst must play
 				// through; trimming mid-utterance is what sounded choppy.
+				p.queued.Add(-int64(len(acc) - winmmMaxAccBytes))
 				copy(acc, acc[len(acc)-winmmMaxAccBytes:])
 				acc = acc[:winmmMaxAccBytes]
 			}
@@ -263,6 +270,16 @@ func winmmDrain(in <-chan []byte, acc []byte) []byte {
 			return acc
 		}
 	}
+}
+
+func winmmBusyCount(bufs []winmmOutBuf) int {
+	n := 0
+	for i := range bufs {
+		if bufs[i].busy {
+			n++
+		}
+	}
+	return n
 }
 
 func winmmAnyBusy(bufs []winmmOutBuf) bool {

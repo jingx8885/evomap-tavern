@@ -1,10 +1,16 @@
 package livevoice
 
 import (
+	"bytes"
+	"context"
+	"encoding/base64"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/jingx8885/lov-evo/internal/audio"
 )
 
 func TestDiscardPCMStopsRecording(t *testing.T) {
@@ -250,4 +256,365 @@ func TestSteerBeforeSpeechSendsNow(t *testing.T) {
 	if s.Speaking() {
 		t.Fatal("a quiet steer must not mark her as speaking")
 	}
+}
+
+func TestBlankNotesDoNotOpenALine(t *testing.T) {
+	s := &Session{}
+	var sent int
+	s.contextSend = func(string, string) error {
+		sent++
+		return nil
+	}
+	if err := s.Steer("  "); err != nil || sent != 0 {
+		t.Fatalf("blank steer err=%v sent=%d", err, sent)
+	}
+	if err := s.Speak(""); !errors.Is(err, ErrHeld) || sent != 0 {
+		t.Fatalf("blank speak err=%v sent=%d", err, sent)
+	}
+	if err := s.Nudge(" "); !errors.Is(err, ErrHeld) || sent != 0 {
+		t.Fatalf("blank nudge err=%v sent=%d", err, sent)
+	}
+}
+
+func TestFlushWhileSpeakingKeepsTheNote(t *testing.T) {
+	s := &Session{}
+	var sent []string
+	s.contextSend = func(channel, text string) error {
+		sent = append(sent, channel+":"+text)
+		return nil
+	}
+	s.handleEvent([]byte(`{"type":"session.output_transcript.delta","delta":"在"}`))
+	if err := s.Steer("Stay."); !errors.Is(err, ErrHeld) {
+		t.Fatal(err)
+	}
+	s.flushDeferred()
+	if len(sent) != 0 {
+		t.Fatalf("flush cut the line: %v", sent)
+	}
+	s.handleEvent([]byte(`{"type":"turn.done","role":"assistant"}`))
+	s.lineOpen.Store(false)
+	s.speechUntil.Store(time.Now().Add(-time.Second).UnixNano())
+	stopDefer(s)
+	s.flushDeferred()
+	if len(sent) != 1 || sent[0] != "developer:Stay." {
+		t.Fatalf("note lost: %v", sent)
+	}
+}
+
+func TestDuplicateSteerMergesOnce(t *testing.T) {
+	s := &Session{}
+	var sent []string
+	s.contextSend = func(channel, text string) error {
+		sent = append(sent, channel+":"+text)
+		return nil
+	}
+	s.markSpeaking()
+	if err := s.Steer("same"); !errors.Is(err, ErrHeld) {
+		t.Fatal(err)
+	}
+	if err := s.Steer("same"); !errors.Is(err, ErrHeld) {
+		t.Fatal(err)
+	}
+	if err := s.Steer("more"); !errors.Is(err, ErrHeld) {
+		t.Fatal(err)
+	}
+	if err := s.Steer("more"); !errors.Is(err, ErrHeld) {
+		t.Fatal(err)
+	}
+	releaseLine(s)
+	s.flushDeferred()
+	if len(sent) != 1 || sent[0] != "developer:same\nmore" {
+		t.Fatalf("merged %v", sent)
+	}
+}
+
+func TestQuietHoldWhileANoteIsWaiting(t *testing.T) {
+	s := &Session{}
+	var sent []string
+	s.contextSend = func(channel, text string) error {
+		sent = append(sent, channel+":"+text)
+		return nil
+	}
+	s.markSpeaking()
+	if err := s.Nudge("first"); !errors.Is(err, ErrHeld) {
+		t.Fatal(err)
+	}
+	releaseLine(s)
+	if s.Speaking() {
+		t.Fatal("line should be quiet")
+	}
+	if err := s.Nudge("second"); !errors.Is(err, ErrHeld) {
+		t.Fatalf("a waiting note should hold the next one: %v", err)
+	}
+	s.flushDeferred()
+	if len(sent) != 1 || sent[0] != "commentary:first\nsecond" {
+		t.Fatalf("sent %v", sent)
+	}
+}
+
+func TestDeferredFailureStillDeliversTheRest(t *testing.T) {
+	s := &Session{}
+	var notes []string
+	s.SetNote(func(msg string) { notes = append(notes, msg) })
+	s.contextSend = func(channel, text string) error {
+		if channel == "developer" {
+			return errors.New("boom")
+		}
+		return nil
+	}
+	s.markSpeaking()
+	s.Steer("scene")
+	s.Nudge("say it")
+	s.Speak("逐字")
+	releaseLine(s)
+	s.flushDeferred()
+	joined := strings.Join(notes, "\n")
+	if !strings.Contains(joined, "[steer] after line failed: boom") {
+		t.Fatalf("notes %q", joined)
+	}
+	if !strings.Contains(joined, "[nudge] after line") || !strings.HasSuffix(joined, "[steer] after line") {
+		t.Fatalf("later notes dropped: %q", joined)
+	}
+}
+
+func TestSpeakableKeepsTheLineAndDeveloperKeepsTheTail(t *testing.T) {
+	s := &Session{}
+	var sent []string
+	s.contextSend = func(channel, text string) error {
+		sent = append(sent, channel+":"+text)
+		return nil
+	}
+	head := strings.Repeat("前", 280)
+	tail := "尾巴在最后"
+	long := head + tail
+	s.markSpeaking()
+	s.Steer(long)
+	s.Speak(long)
+	releaseLine(s)
+	s.flushDeferred()
+	if len(sent) != 2 {
+		t.Fatalf("sent %d %v", len(sent), sent)
+	}
+	dev := strings.TrimPrefix(sent[0], "developer:")
+	say := strings.TrimPrefix(sent[1], "speakable:")
+	if !strings.HasPrefix(dev, "…") || !strings.Contains(dev, tail) || strings.Contains(dev, head) {
+		t.Fatalf("developer %q", dev)
+	}
+	if say != long {
+		t.Fatal("speakable was clipped")
+	}
+}
+
+func TestLineStaysOpenUntilDoneOrStuck(t *testing.T) {
+	s := &Session{}
+	pcm := audio.TonePCM(440, 0.02)
+	delta := `{"type":"session.output_audio.delta","delta":"` + base64.StdEncoding.EncodeToString(pcm) + `"}`
+	s.handleEvent([]byte(delta))
+	if !s.Speaking() {
+		t.Fatal("downlink speech should hold the line")
+	}
+	s.handleEvent([]byte(`{"type":"turn.done","role":"user","transcript":"喂"}`))
+	if !s.Speaking() {
+		t.Fatal("a user turn must not close her line")
+	}
+	s.speechUntil.Store(time.Now().Add(-time.Millisecond).UnixNano())
+	if !s.Speaking() {
+		t.Fatal("a missing turn.done keeps the line for a few seconds")
+	}
+	s.speechUntil.Store(time.Now().Add(-speechStuck - time.Second).UnixNano())
+	if s.Speaking() {
+		t.Fatal("a stuck line should expire")
+	}
+
+	s.handleEvent([]byte(`{"type":"session.output_transcript.delta","delta":"嗯"}`))
+	s.handleEvent([]byte(`{"type":"turn.done","role":"assistant"}`))
+	if !s.Speaking() {
+		t.Fatal("the tail after turn.done should still count as speaking")
+	}
+	s.speechUntil.Store(time.Now().Add(-time.Millisecond).UnixNano())
+	if s.Speaking() {
+		t.Fatal("a closed line with an expired tail is quiet")
+	}
+}
+
+func TestUplinkMicPaths(t *testing.T) {
+	room := ulawFrame(700)
+	voice := ulawFrame(12000)
+	silence := string(bytes.Repeat([]byte{audio.SilenceByte}, audio.PCMUFrameBytes))
+
+	t.Run("room", func(t *testing.T) {
+		t.Setenv("TAVERN_MIC_NEAR", "1")
+		wrote := runUplink(t, nil, repeatFrames(room, 8))
+		if len(wrote) < 3 {
+			t.Fatalf("wrote %d", len(wrote))
+		}
+		for i, f := range wrote {
+			if audio.UlawRMS(f) != 0 {
+				t.Fatalf("room frame %d reached the uplink rms=%.4f", i, audio.UlawRMS(f))
+			}
+		}
+	})
+
+	t.Run("close", func(t *testing.T) {
+		t.Setenv("TAVERN_MIC_NEAR", "1")
+		wrote := runUplink(t, nil, repeatFrames(voice, 6))
+		if !anyLoud(wrote) {
+			t.Fatal("close speech never reached the uplink")
+		}
+	})
+
+	t.Run("duck", func(t *testing.T) {
+		t.Setenv("TAVERN_MIC_NEAR", "off")
+		wrote := runUplink(t, func(s *Session) {
+			s.duckMicUntil.Store(time.Now().Add(10 * time.Second).UnixNano())
+		}, repeatFrames(voice, 6))
+		for i, f := range wrote {
+			if string(f) != silence {
+				t.Fatalf("ducked frame %d was live", i)
+			}
+		}
+	})
+
+	t.Run("clip", func(t *testing.T) {
+		t.Setenv("TAVERN_MIC_NEAR", "off")
+		frames := make([][]byte, 20)
+		for i := range frames {
+			cp := append([]byte(nil), voice...)
+			cp[0] = byte(i)
+			frames[i] = cp
+		}
+		wrote := runUplinkBurst(t, frames)
+		if len(wrote) < 6 {
+			t.Fatalf("wrote %d", len(wrote))
+		}
+		got := wrote[len(wrote)-6:]
+		for i := range got {
+			want := frames[14+i]
+			if string(got[i]) != string(want) {
+				t.Fatalf("frame %d is %d want %d", i, got[i][0], want[0])
+			}
+		}
+	})
+}
+
+func ulawFrame(sample int16) []byte {
+	pcm := make([]byte, audio.PCMUFrameBytes*2)
+	for i := 0; i < len(pcm); i += 2 {
+		pcm[i] = byte(sample)
+		pcm[i+1] = byte(sample >> 8)
+	}
+	return audio.MuLawEncodeBytes(pcm)
+}
+
+func repeatFrames(frame []byte, n int) [][]byte {
+	out := make([][]byte, n)
+	for i := range out {
+		out[i] = append([]byte(nil), frame...)
+	}
+	return out
+}
+
+func anyLoud(frames [][]byte) bool {
+	for _, f := range frames {
+		if audio.UlawRMS(f) > 0.05 {
+			return true
+		}
+	}
+	return false
+}
+
+func runUplink(t *testing.T, prep func(*Session), frames [][]byte) [][]byte {
+	t.Helper()
+	s := &Session{}
+	if prep != nil {
+		prep(s)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mic := make(chan []byte, 32)
+	for _, f := range frames {
+		mic <- f
+	}
+	var mu sync.Mutex
+	var wrote [][]byte
+	go s.uplinkMic(ctx, mic, func(f []byte) {
+		mu.Lock()
+		wrote = append(wrote, append([]byte(nil), f...))
+		mu.Unlock()
+	}, bytesRepeatSilence())
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(wrote)
+		mu.Unlock()
+		if n >= 4 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	mu.Lock()
+	defer mu.Unlock()
+	return append([][]byte(nil), wrote...)
+}
+
+func runUplinkBurst(t *testing.T, frames [][]byte) [][]byte {
+	t.Helper()
+	s := &Session{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mic := make(chan []byte, 32)
+	var mu sync.Mutex
+	var wrote [][]byte
+	go s.uplinkMic(ctx, mic, func(f []byte) {
+		mu.Lock()
+		wrote = append(wrote, append([]byte(nil), f...))
+		mu.Unlock()
+	}, bytesRepeatSilence())
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(wrote)
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	for _, f := range frames {
+		mic <- f
+	}
+	deadline = time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(wrote)
+		mu.Unlock()
+		if n >= 7 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	mu.Lock()
+	defer mu.Unlock()
+	return append([][]byte(nil), wrote...)
+}
+
+func bytesRepeatSilence() []byte {
+	return bytes.Repeat([]byte{audio.SilenceByte}, audio.PCMUFrameBytes)
+}
+
+func stopDefer(s *Session) {
+	s.deferMu.Lock()
+	if s.deferTimer != nil {
+		s.deferTimer.Stop()
+		s.deferTimer = nil
+	}
+	s.deferMu.Unlock()
+}
+
+func releaseLine(s *Session) {
+	s.lineOpen.Store(false)
+	s.speechUntil.Store(time.Now().Add(-time.Second).UnixNano())
+	stopDefer(s)
 }

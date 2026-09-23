@@ -344,6 +344,143 @@ func TestNearGateDisabledPassesRoom(t *testing.T) {
 	}
 }
 
+func TestNearGateEnv(t *testing.T) {
+	cases := []struct {
+		env      string
+		disabled bool
+		scale    float64
+	}{
+		{"", false, 1},
+		{"1", false, 1},
+		{"off", true, 1},
+		{"0", true, 1},
+		{"false", true, 1},
+		{"no", true, 1},
+		{"0.7", false, 0.7},
+		{"1.5", false, 1.5},
+		{"nope", false, 1},
+		{"9", false, 1},
+		{"-1", false, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.env, func(t *testing.T) {
+			if tc.env == "" {
+				t.Setenv("TAVERN_MIC_NEAR", "")
+			} else {
+				t.Setenv("TAVERN_MIC_NEAR", tc.env)
+			}
+			g := NewNearGate()
+			if g.disabled != tc.disabled || g.scale != tc.scale {
+				t.Fatalf("disabled=%v scale=%v", g.disabled, g.scale)
+			}
+		})
+	}
+}
+
+func TestNearGateNilAndEmpty(t *testing.T) {
+	var g *NearGate
+	room := ulawAt(700)
+	got := g.Filter(room)
+	if len(got) != 1 || !bytes.Equal(got[0], room) {
+		t.Fatal("nil gate should pass the frame")
+	}
+	g = &NearGate{floor: nearFloorInit, scale: 1}
+	if g.Filter(nil) != nil || g.Filter([]byte{}) != nil {
+		t.Fatal("empty frame should stay off the uplink")
+	}
+}
+
+func TestNearGateScaleChangesWhoGetsThrough(t *testing.T) {
+	medium := ulawBetween(0.09, 0.11)
+	loose := &NearGate{floor: nearFloorInit, scale: 0.7}
+	if len(loose.Filter(medium)) != 0 {
+		t.Fatal("first frame arms")
+	}
+	if len(loose.Filter(medium)) < 2 {
+		t.Fatal("a looser scale should open for this level during warmup")
+	}
+	strict := &NearGate{floor: nearFloorInit, scale: 1.5}
+	if len(strict.Filter(medium)) != 0 || len(strict.Filter(medium)) != 0 {
+		t.Fatal("a stricter scale should hold the same level out")
+	}
+}
+
+func TestNearGatePrerollClickReopenAndFloor(t *testing.T) {
+	silence := bytes.Repeat([]byte{SilenceByte}, PCMUFrameBytes)
+	voice := ulawAt(8000)
+
+	preroll := &NearGate{floor: nearFloorInit, scale: 1, seen: nearFloorWarmup + 1}
+	for i := 0; i < 10; i++ {
+		if len(preroll.Filter(silence)) != 0 {
+			t.Fatalf("silence %d leaked", i)
+		}
+	}
+	if len(preroll.Filter(voice)) != 0 {
+		t.Fatal("one loud frame should only arm")
+	}
+	got := preroll.Filter(voice)
+	if len(got) != nearPreRollFrames+1 {
+		t.Fatalf("preroll %d want %d", len(got), nearPreRollFrames+1)
+	}
+
+	click := &NearGate{floor: nearFloorInit, scale: 1, seen: nearFloorWarmup + 1}
+	if len(click.Filter(voice)) != 0 || len(click.Filter(silence)) != 0 || len(click.Filter(voice)) != 0 {
+		t.Fatal("a click, a gap, and another click should not open")
+	}
+	if len(click.Filter(voice)) < 2 {
+		t.Fatal("two close frames after the gap should open")
+	}
+
+	again := &NearGate{floor: nearFloorInit, scale: 1, seen: nearFloorWarmup + 1}
+	again.Filter(voice)
+	if len(again.Filter(voice)) < 1 {
+		t.Fatal("open")
+	}
+	for i := 0; i < nearHangoverFrames; i++ {
+		if len(again.Filter(silence)) != 1 {
+			t.Fatalf("hangover %d dropped", i)
+		}
+	}
+	if len(again.Filter(silence)) != 0 || again.open {
+		t.Fatal("the gate should close after hangover")
+	}
+	if len(again.Filter(voice)) != 0 {
+		t.Fatal("reopen should arm first")
+	}
+	if len(again.Filter(voice)) < 2 {
+		t.Fatal("close speech after a pause should open again")
+	}
+
+	held := &NearGate{floor: nearFloorInit, scale: 1, seen: nearFloorWarmup + 1}
+	held.Filter(voice)
+	held.Filter(voice)
+	floor := held.floor
+	for i := 0; i < 20; i++ {
+		if len(held.Filter(voice)) != 1 {
+			t.Fatalf("open frame %d", i)
+		}
+	}
+	if held.floor != floor {
+		t.Fatalf("floor moved from %.4f to %.4f while she was close", floor, held.floor)
+	}
+
+	zero := &NearGate{floor: nearFloorInit, scale: 0, seen: nearFloorWarmup + 1}
+	zero.Filter(voice)
+	if len(zero.Filter(voice)) < 2 {
+		t.Fatal("scale 0 should behave as 1")
+	}
+}
+
+func ulawBetween(lo, hi float64) []byte {
+	for s := int16(200); s < 16000; s += 25 {
+		frame := ulawAt(s)
+		if r := UlawRMS(frame); r >= lo && r < hi {
+			return frame
+		}
+	}
+	panic("no ulaw frame in range")
+}
+
 func TestUlawRMSSilence(t *testing.T) {
 	ulaw := bytes.Repeat([]byte{SilenceByte}, PCMUFrameBytes)
 	if r := UlawRMS(ulaw); r != 0 {

@@ -328,6 +328,32 @@ func (c *Client) write(kind string, raw []byte) (string, error) {
 	return name, nil
 }
 
+// Missing lists "kind(model)" for each media model the gateway does not offer.
+func (c *Client) Missing(ctx context.Context) ([]string, error) {
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := c.getJSON(ctx, c.v1("/models"), &resp, 20*time.Second); err != nil {
+		return nil, err
+	}
+	have := map[string]bool{}
+	for _, m := range resp.Data {
+		have[m.ID] = true
+	}
+	var out []string
+	for _, km := range [][2]string{
+		{KindImage, c.ImageModel}, {KindVideo, c.VideoModel},
+		{KindSpeech, c.SpeechModel}, {KindSong, c.SongModel},
+	} {
+		if km[1] != "" && !have[km[1]] {
+			out = append(out, km[0]+"("+km[1]+")")
+		}
+	}
+	return out, nil
+}
+
 func (c *Client) v1(path string) string   { return c.join(path, false) }
 func (c *Client) host(path string) string { return c.join(path, true) }
 

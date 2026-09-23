@@ -191,6 +191,9 @@ func runPS(script string, extra map[string]string) ([]byte, error) {
 		return nil, err
 	}
 	path := f.Name()
+	// The console code page (GBK on Chinese Windows) would garble titles;
+	// Go reads stdout as UTF-8.
+	script = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n" + script
 	if _, err := f.WriteString(script); err != nil {
 		f.Close()
 		os.Remove(path)

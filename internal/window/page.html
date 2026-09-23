@@ -14,78 +14,313 @@
     --accent: #e0b15a;
     --card: #221c18;
     --line: #3a332c;
+    --ok: #8fbf7a;
+    --bad: #d16a6a;
     --radius: 12px;
-    --font: "Segoe UI", sans-serif;
+    --font: "Segoe UI", "Microsoft YaHei", sans-serif;
   }
-  html, body { margin: 0; height: 100%; background: var(--ground); color: var(--ink); font: 15px/1.4 var(--font); }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--ground); color: var(--ink); font: 14px/1.5 var(--font); }
   body.frame-plain #frame { border-color: transparent; }
-  body.frame-glow #frame { box-shadow: 0 0 24px var(--accent); }
-  #desk { min-height: 100%; display: flex; flex-direction: column; padding: 16px; box-sizing: border-box; }
-  #bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
-  #bar strong { font-weight: 600; letter-spacing: 0.04em; }
-  .chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; color: var(--muted); }
-  #controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  body.frame-glow #frame { box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 45%, transparent); }
+
+  #desk { height: 100%; display: flex; flex-direction: column; padding: 14px 16px 16px; gap: 10px; }
+  #bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #bar strong { font-size: 15px; font-weight: 600; letter-spacing: 0.04em; margin-right: 4px; }
+  .chip { border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px; color: var(--muted); font-size: 12px; }
+  .chip b { color: var(--ink); font-weight: 600; }
+  .chip.run b { color: var(--accent); }
+  .chip.bad b { color: var(--bad); }
+  #counts { display: flex; gap: 6px; flex-wrap: wrap; }
+  #link { margin-left: auto; display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+  #link i { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+  #link.lost i { background: var(--bad); }
+
+  #controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   #controls:empty { display: none; }
   .ctl.label { font-weight: 600; width: 100%; }
   .ctl.note { color: var(--muted); width: 100%; }
-  .ctl.chip { border: 1px solid var(--accent); color: var(--accent); border-radius: 999px; padding: 2px 10px; }
-  .ctl.rule { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
-  .ctl.meter { width: 100%; }
-  .ctl.meter i { display: block; height: 6px; margin-top: 4px; background: var(--accent); border-radius: 99px; }
-  #frame { flex: 1; background: var(--desk); border: 1px solid var(--line); border-radius: var(--radius); min-height: 280px; overflow: hidden; }
-  #frame.covered { display: grid; place-items: center; color: var(--muted); }
-  .split { display: grid; grid-template-columns: 280px 1fr; height: 100%; }
-  .queue { display: flex; }
-  .stage { display: block; }
-  .column { overflow: auto; border-right: 1px solid var(--line); padding: 10px; }
-  .stage-only .column { display: none; }
-  .queue-only .feature { display: none; }
-  .queue-only .column { border-right: 0; width: 100%; }
-  .card { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; margin-bottom: 8px; background: var(--card); }
-  .card.on { border-color: var(--accent); }
-  .kind { color: var(--accent); font-size: 12px; text-transform: uppercase; }
-  .status { float: right; color: var(--muted); font-size: 12px; }
-  .prompt { margin: 6px 0; }
-  .bar { height: 6px; background: var(--line); border-radius: 99px; overflow: hidden; }
-  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); }
-  .ready .bar > i { background: #8fbf7a; }
-  .failed .bar > i { background: #d16a6a; }
-  .feature { padding: 16px; overflow: auto; }
-  .feature img, .feature video { max-width: 100%; max-height: 70vh; border-radius: 8px; background: var(--ground); }
-  .note { white-space: pre-wrap; }
-  .look { color: var(--muted); margin-top: 8px; }
+  .ctl.chip { border: 1px solid var(--accent); color: var(--accent); border-radius: 999px; padding: 1px 10px; font-size: 12px; }
+  .ctl.rule { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 2px 0; }
+  .ctl.meter { width: 100%; font-size: 12px; color: var(--muted); }
+  .ctl.meter .track { height: 6px; margin-top: 4px; background: var(--line); border-radius: 99px; overflow: hidden; }
+  .ctl.meter .track i { display: block; height: 100%; background: var(--accent); }
+
+  #frame { flex: 1; min-height: 0; background: var(--desk); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; display: grid; }
+  #frame.layout-split { grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); }
+  #frame.layout-queue, #frame.layout-stage, #frame.covered { grid-template-columns: minmax(0, 1fr); }
+  #frame.layout-queue #feature, #frame.layout-stage #column, #frame.covered #column, #frame.covered #feature { display: none; }
+  #cover { display: none; place-items: center; color: var(--muted); font-size: 15px; letter-spacing: 0.1em; }
+  #frame.covered #cover { display: grid; }
+
+  #column { overflow-y: auto; border-right: 1px solid var(--line); padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  #frame.layout-queue #column { border-right: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); align-content: start; }
+  .empty { color: var(--muted); padding: 24px 8px; text-align: center; }
+
+  .card { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; background: var(--card); transition: border-color .2s; }
+  .card.on { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+  .card.canceled, .card.failed { opacity: .72; }
+  .head { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  .kind { color: var(--accent); font-weight: 600; }
+  .jid { color: var(--muted); opacity: .7; }
+  .pill { margin-left: auto; border-radius: 999px; padding: 0 8px; font-size: 11px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .running .pill { border-color: var(--accent); color: var(--accent); }
+  .ready .pill { border-color: var(--ok); color: var(--ok); }
+  .failed .pill { border-color: var(--bad); color: var(--bad); }
+  .card .prompt { margin: 6px 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+  .thumb { display: block; width: 100%; max-height: 120px; object-fit: cover; border-radius: calc(var(--radius) / 2); margin: 6px 0; background: var(--ground); }
+  .thumb[hidden] { display: none; }
+  .track { height: 5px; background: var(--line); border-radius: 99px; overflow: hidden; }
+  .track > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
+  .ready .track > i { background: var(--ok); }
+  .failed .track > i { background: var(--bad); }
+  .running .track > i { background-image: linear-gradient(90deg, transparent, rgba(255,255,255,.25), transparent); background-size: 200% 100%; animation: sweep 1.4s linear infinite; }
+  @keyframes sweep { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+  .meta { display: flex; gap: 8px; margin-top: 5px; font-size: 12px; color: var(--muted); }
+  .meta .detail { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .failed .meta .detail { color: var(--bad); }
+
+  #feature { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  #feature .top { padding: 14px 18px 10px; border-bottom: 1px solid var(--line); }
+  #feature .top .head { font-size: 13px; }
+  #feature .top .prompt { margin-top: 6px; color: var(--muted); max-height: 4.5em; overflow-y: auto; word-break: break-word; }
+  #feature .body { flex: 1; min-height: 0; overflow: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+  #feature .body.media { align-items: center; justify-content: center; }
+  #feature img, #feature video { max-width: 100%; max-height: 100%; min-height: 0; object-fit: contain; border-radius: calc(var(--radius) / 1.5); background: var(--ground); }
+  #feature a.full { display: contents; }
+  #feature audio { width: min(520px, 100%); }
+  .glyph { font-size: 48px; color: var(--accent); opacity: .8; }
+  .note { white-space: pre-wrap; word-break: break-word; font-size: 15px; line-height: 1.7; max-width: 72ch; }
+  .note.mono { font: 13px/1.6 "Cascadia Mono", ui-monospace, monospace; }
+  .wait { margin: auto; width: min(420px, 100%); text-align: center; color: var(--muted); }
+  .wait .big { font-size: 34px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .wait .track { height: 8px; margin: 12px 0 8px; }
+  .error { border: 1px solid var(--bad); color: var(--bad); border-radius: calc(var(--radius) / 1.5); padding: 10px 12px; white-space: pre-wrap; word-break: break-word; }
+  .look { color: var(--muted); border-top: 1px solid var(--line); padding: 10px 18px; font-size: 13px; }
+  .look:empty { display: none; }
+  .look::before { content: "她看到的："; color: var(--accent); }
+
+  @media (max-width: 720px) {
+    #desk { padding: 10px; }
+    #frame.layout-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 38%) minmax(0, 1fr); }
+    #frame.layout-split #column { border-right: 0; border-bottom: 1px solid var(--line); }
+  }
 </style>
 </head>
 <body>
   <div id="desk">
-    <header id="bar"><strong id="title">stage</strong><span class="chip" id="layout">split</span></header>
+    <header id="bar">
+      <strong id="title">stage</strong>
+      <span class="chip" id="layout">split</span>
+      <span id="counts"></span>
+      <span id="link"><i></i><span>已连接</span></span>
+    </header>
     <div id="controls"></div>
-    <div id="frame"></div>
+    <main id="frame" class="layout-split">
+      <aside id="column"></aside>
+      <section id="feature"></section>
+      <div id="cover">窗口合上了</div>
+    </main>
   </div>
   <script>
-    function esc(s) {
-      return String(s || "").replace(/[&<>"]/g, function (c) {
-        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    var KIND = { image: "图片", video: "视频", speech: "语音", song: "歌曲", llm: "笔记", codex: "Codex" };
+    var STATUS = { queued: "排队", running: "进行中", ready: "完成", failed: "失败", canceled: "已取消" };
+    var LAYOUT = { split: "分栏", queue: "只看队列", stage: "只看右框" };
+    var skew = 0;
+    var last = "";
+    var lastDoc = null;
+    var cards = {};
+    var featureKey = "";
+
+    function el(tag, cls, text) {
+      var n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text != null) n.textContent = text;
+      return n;
+    }
+    function media(file) { return "/media/" + encodeURIComponent(file); }
+    function pct(job) { return Math.round(Math.max(0, Math.min(1, job.ratio || 0)) * 100); }
+    function now() { return Date.now() + skew; }
+    function dur(ms) {
+      if (!(ms > 0)) return "";
+      var s = Math.round(ms / 1000);
+      if (s < 60) return s + " 秒";
+      var m = Math.floor(s / 60);
+      if (m < 60) return m + " 分 " + (s % 60) + " 秒";
+      return Math.floor(m / 60) + " 小时 " + (m % 60) + " 分";
+    }
+    function elapsed(job) {
+      if (job.status === "queued") return job.created ? "等了 " + dur(now() - job.created) : "";
+      if (job.status === "running") return job.started ? dur(now() - job.started) : "";
+      if (job.started && job.ended) return "用时 " + dur(job.ended - job.started);
+      return "";
+    }
+    function detail(job) {
+      if (job.status === "failed") return job.err || "失败";
+      if (job.status === "running") {
+        var d = job.detail && job.detail !== "running" ? job.detail : "处理中";
+        return d + " · " + pct(job) + "%";
+      }
+      return "";
+    }
+    function head(job) {
+      var h = el("div", "head");
+      h.appendChild(el("span", "kind", KIND[job.kind] || job.kind));
+      h.appendChild(el("span", "jid", job.id));
+      h.appendChild(el("span", "pill", STATUS[job.status] || job.status));
+      return h;
+    }
+
+    function makeCard(job) {
+      var c = el("article", "card");
+      c.appendChild(head(job));
+      c._prompt = c.appendChild(el("div", "prompt"));
+      c._thumb = c.appendChild(el("img", "thumb"));
+      c._thumb.alt = "";
+      c._thumb.loading = "lazy";
+      c._thumb.hidden = true;
+      var t = c.appendChild(el("div", "track"));
+      c._bar = t.appendChild(el("i"));
+      var m = c.appendChild(el("div", "meta"));
+      c._detail = m.appendChild(el("span", "detail"));
+      c._time = m.appendChild(el("span", "time"));
+      return c;
+    }
+    function updateCard(c, job, on) {
+      c.className = "card " + job.status + (on ? " on" : "");
+      c.title = job.prompt || "";
+      c.querySelector(".pill").textContent = STATUS[job.status] || job.status;
+      c._prompt.textContent = job.prompt || "";
+      var thumb = job.kind === "image" && job.status === "ready" && job.file ? media(job.file) : "";
+      if (thumb && c._thumb.getAttribute("src") !== thumb) c._thumb.src = thumb;
+      c._thumb.hidden = !thumb;
+      c._bar.style.width = (job.status === "queued" || job.status === "canceled" ? 0 : pct(job)) + "%";
+      c._detail.textContent = detail(job);
+      c._detail.title = detail(job);
+      c._time.textContent = elapsed(job);
+    }
+    function paintColumn(jobs, featureID) {
+      var col = document.getElementById("column");
+      if (!jobs.length) {
+        cards = {};
+        col.replaceChildren(el("div", "empty", "队列是空的。让她画点什么、写点什么，就会出现在这里。"));
+        return;
+      }
+      var keep = {};
+      var order = [];
+      jobs.forEach(function (job) {
+        var c = cards[job.id] || makeCard(job);
+        cards[job.id] = c;
+        keep[job.id] = true;
+        updateCard(c, job, job.id === featureID);
+        order.push(c);
       });
+      Object.keys(cards).forEach(function (id) { if (!keep[id]) delete cards[id]; });
+      var same = col.children.length === order.length && order.every(function (c, i) { return col.children[i] === c; });
+      if (!same) col.replaceChildren.apply(col, order);
     }
-    function card(job, on) {
-      var ratio = Math.max(0, Math.min(1, job.ratio || 0));
-      return '<article class="card ' + esc(job.status) + (on ? " on" : "") + '">' +
-        '<div class="kind">' + esc(job.kind) + '<span class="status">' + esc(job.status) + "</span></div>" +
-        '<div class="prompt">' + esc(job.prompt) + "</div>" +
-        '<div class="bar"><i style="width:' + Math.round(ratio * 100) + '%"></i></div>' +
-        "</article>";
+
+    function aheadOf(jobs, job) {
+      var n = 0;
+      jobs.forEach(function (j) {
+        if (j.status === "running") n++;
+        else if (j.status === "queued" && j.id !== job.id && (j.created || 0) <= (job.created || 0)) n++;
+      });
+      return n;
     }
-    function feature(job) {
-      if (!job) return '<p class="look">空的右框。</p>';
-      var body = "";
-      if (job.file && job.kind === "image") body = '<img alt="" src="/media/' + encodeURIComponent(job.file) + '">';
-      else if (job.file && job.kind === "video") body = '<video controls src="/media/' + encodeURIComponent(job.file) + '"></video>';
-      else if (job.file && (job.kind === "speech" || job.kind === "song")) body = '<audio controls src="/media/' + encodeURIComponent(job.file) + '"></audio>';
-      else if (job.text) body = '<p class="note">' + esc(job.text) + "</p>";
-      else body = '<p class="prompt">' + esc(job.prompt) + "</p>" + card(job, true);
-      if (job.look) body += '<p class="look">' + esc(job.look) + "</p>";
+    function buildBody(job, jobs) {
+      var body = el("div", "body");
+      if (job.status === "ready" && job.file && (job.kind === "image" || job.kind === "video")) {
+        body.className = "body media";
+        if (job.kind === "image") {
+          var a = el("a", "full");
+          a.href = media(job.file);
+          a.target = "_blank";
+          var img = el("img");
+          img.alt = job.look || job.prompt || "";
+          img.src = media(job.file);
+          a.appendChild(img);
+          body.appendChild(a);
+        } else {
+          var v = el("video");
+          v.controls = true;
+          v.preload = "metadata";
+          v.src = media(job.file);
+          body.appendChild(v);
+        }
+      } else if (job.status === "ready" && job.file && (job.kind === "speech" || job.kind === "song")) {
+        body.className = "body media";
+        body.appendChild(el("div", "glyph", job.kind === "song" ? "♪" : "◉"));
+        var au = el("audio");
+        au.controls = true;
+        au.preload = "metadata";
+        au.src = media(job.file);
+        body.appendChild(au);
+      } else if (job.status === "ready" && job.text) {
+        body.appendChild(el("div", "note" + (job.kind === "codex" ? " mono" : ""), job.text));
+      } else if (job.status === "running") {
+        var w = el("div", "wait");
+        w._big = w.appendChild(el("div", "big"));
+        var t = w.appendChild(el("div", "track"));
+        w._bar = t.appendChild(el("i"));
+        w._detail = w.appendChild(el("div"));
+        body.appendChild(w);
+        body._wait = w;
+      } else if (job.status === "queued") {
+        var q = el("div", "wait");
+        var n = aheadOf(jobs, job);
+        q.appendChild(el("div", "big", n ? "前面还有 " + n + " 个" : "马上开始"));
+        body.appendChild(q);
+      } else if (job.status === "failed") {
+        body.appendChild(el("div", "error", job.err || "失败了，没有给出原因。"));
+      } else if (job.status === "canceled") {
+        body.appendChild(el("div", "wait", "这一项已取消。"));
+      } else {
+        body.appendChild(el("div", "wait", "完成了，但没有可显示的结果。"));
+      }
       return body;
+    }
+    function paintFeature(job, jobs) {
+      var box = document.getElementById("feature");
+      if (!job) {
+        featureKey = "";
+        box.replaceChildren(el("div", "wait", "右框是空的。"));
+        return;
+      }
+      var key = [job.id, job.status, job.file || "", job.text || "", job.err || ""].join("|");
+      if (key !== featureKey) {
+        featureKey = key;
+        var top = el("div", "top " + job.status);
+        top.appendChild(head(job));
+        top._time = top.querySelector(".head").insertBefore(el("span", "jid"), top.querySelector(".pill"));
+        top.appendChild(el("div", "prompt", job.prompt || ""));
+        box._top = top;
+        box._body = buildBody(job, jobs);
+        box._look = el("div", "look");
+        box.replaceChildren(top, box._body, box._look);
+      }
+      box._top._time.textContent = elapsed(job) ? "· " + elapsed(job) : "";
+      if (box._look.textContent !== (job.look || "")) box._look.textContent = job.look || "";
+      var w = box._body._wait;
+      if (w) {
+        w._big.textContent = pct(job) + "%";
+        w._bar.style.width = pct(job) + "%";
+        w._detail.textContent = job.detail && job.detail !== "running" ? job.detail : "处理中";
+      }
+    }
+
+    function paintCounts(jobs) {
+      var n = { queued: 0, running: 0, ready: 0, failed: 0 };
+      jobs.forEach(function (j) { if (n[j.status] != null) n[j.status]++; });
+      var box = document.getElementById("counts");
+      box.replaceChildren();
+      [["running", "run"], ["queued", ""], ["ready", ""], ["failed", "bad"]].forEach(function (p) {
+        if (!n[p[0]]) return;
+        var c = el("span", "chip " + p[1]);
+        c.appendChild(el("b", null, String(n[p[0]])));
+        c.appendChild(document.createTextNode(" " + STATUS[p[0]]));
+        box.appendChild(c);
+      });
     }
     function applyTheme(theme) {
       if (!theme) return;
@@ -97,59 +332,89 @@
       Object.keys(map).forEach(function (key) {
         if (theme[key]) root.style.setProperty(map[key], theme[key]);
       });
-      var radius = { tight: "6px", soft: "12px", round: "22px" }[theme.radius] || "12px";
-      root.style.setProperty("--radius", radius);
-      var font = {
-        sans: '"Segoe UI", sans-serif',
-        serif: 'Georgia, serif',
+      root.style.setProperty("--radius", { tight: "6px", soft: "12px", round: "22px" }[theme.radius] || "12px");
+      root.style.setProperty("--font", {
+        sans: '"Segoe UI", "Microsoft YaHei", sans-serif',
+        serif: 'Georgia, "Songti SC", SimSun, serif',
         mono: '"Cascadia Mono", ui-monospace, monospace'
-      }[theme.font] || '"Segoe UI", sans-serif';
-      root.style.setProperty("--font", font);
+      }[theme.font] || '"Segoe UI", "Microsoft YaHei", sans-serif');
       document.body.classList.toggle("frame-plain", theme.frame === "plain");
       document.body.classList.toggle("frame-glow", theme.frame === "glow");
     }
-    function controlsHTML(list) {
-      return (list || []).map(function (c) {
-        if (c.kind === "rule") return '<hr class="ctl rule">';
+    function paintControls(list) {
+      var box = document.getElementById("controls");
+      box.replaceChildren.apply(box, (list || []).map(function (c) {
+        if (c.kind === "rule") return el("hr", "ctl rule");
         if (c.kind === "meter") {
-          var w = Math.round(Math.max(0, Math.min(1, c.value || 0)) * 100);
-          return '<div class="ctl meter"><span>' + esc(c.text) + '</span><i style="width:' + w + '%"></i></div>';
+          var m = el("div", "ctl meter", c.text);
+          var t = m.appendChild(el("div", "track"));
+          t.appendChild(el("i")).style.width = Math.round(Math.max(0, Math.min(1, c.value || 0)) * 100) + "%";
+          return m;
         }
-        return '<div class="ctl ' + esc(c.kind) + '">' + esc(c.text) + "</div>";
-      }).join("");
+        return el("div", "ctl " + c.kind, c.text);
+      }));
     }
+
     function paint(doc) {
-      var frame = document.getElementById("frame");
       var view = doc.view || {};
+      var jobs = view.jobs || [];
+      var frame = document.getElementById("frame");
       applyTheme(view.theme);
       document.getElementById("title").textContent = doc.title || "stage";
-      document.getElementById("layout").textContent = view.layout || "split";
-      document.getElementById("controls").innerHTML = doc.open ? controlsHTML(view.controls) : "";
+      var layout = view.layout || "split";
+      document.getElementById("layout").textContent = LAYOUT[layout] || layout;
+      paintCounts(jobs);
+      paintControls(doc.open ? view.controls : null);
       if (!doc.open) {
         frame.className = "covered";
-        frame.textContent = "窗口合上了";
         return;
       }
-      var jobs = view.jobs || [];
+      frame.className = "layout-" + layout;
       var featureID = view.feature || "";
       var featured = null;
-      var cards = "";
-      jobs.forEach(function (job) {
-        var on = job.id === featureID;
-        if (on) featured = job;
-        cards += card(job, on);
-      });
+      jobs.forEach(function (j) { if (j.id === featureID) featured = j; });
       if (!featured && jobs.length) featured = jobs[0];
-      var layout = view.layout || "split";
-      var cls = layout === "queue" ? "queue-only" : layout === "stage" ? "stage-only" : "split";
-      frame.className = cls;
-      frame.innerHTML = '<div class="' + cls + '"><div class="column">' + cards + '</div><div class="feature">' + feature(featured) + "</div></div>";
+      paintColumn(jobs, featured ? featured.id : "");
+      paintFeature(featured, jobs);
+    }
+    function clock() {
+      if (!lastDoc || !lastDoc.open) return;
+      var jobs = (lastDoc.view && lastDoc.view.jobs) || [];
+      jobs.forEach(function (j) {
+        var c = cards[j.id];
+        if (c) c._time.textContent = elapsed(j);
+      });
+      var box = document.getElementById("feature");
+      if (box._top && featureKey) {
+        var id = featureKey.split("|")[0];
+        jobs.forEach(function (j) {
+          if (j.id === id) box._top._time.textContent = elapsed(j) ? "· " + elapsed(j) : "";
+        });
+      }
+    }
+    function link(ok) {
+      var l = document.getElementById("link");
+      l.classList.toggle("lost", !ok);
+      l.lastChild.textContent = ok ? "已连接" : "连接断开，重试中";
     }
     function tick() {
-      fetch("/api/desktop").then(function (r) { return r.json(); }).then(paint).catch(function () {});
+      fetch("/api/desktop", { cache: "no-store" })
+        .then(function (r) { return r.text(); })
+        .then(function (raw) {
+          link(true);
+          var doc = JSON.parse(raw);
+          if (doc.view && doc.view.now) skew = doc.view.now - Date.now();
+          var sig = raw.replace(/"now":\d+,?/, "");
+          if (sig === last) return;
+          last = sig;
+          lastDoc = doc;
+          paint(doc);
+        })
+        .catch(function () { link(false); })
+        .then(function () { setTimeout(tick, document.hidden ? 3000 : 800); });
     }
     tick();
-    setInterval(tick, 1000);
+    setInterval(clock, 1000);
   </script>
 </body>
 </html>

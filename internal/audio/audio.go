@@ -285,6 +285,20 @@ type Player struct {
 	closed     atomic.Bool
 	stream     func([]byte)
 	closeFn    func()
+	// queued is downlink PCM (24kHz s16le) not yet handed to the device.
+	queued atomic.Int64
+	// busy is how many device buffers are still playing.
+	busy atomic.Int64
+}
+
+// Backlog is how far playback runs behind the newest downlink audio.
+func (p *Player) Backlog() time.Duration {
+	if p == nil {
+		return 0
+	}
+	bytes := p.queued.Load()
+	d := time.Duration(bytes) * time.Second / time.Duration(DownlinkRate*2)
+	return d + time.Duration(p.busy.Load())*40*time.Millisecond
 }
 
 // Kind is the playback backend name, or "none".

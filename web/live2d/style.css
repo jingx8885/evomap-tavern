@@ -147,7 +147,11 @@ dd {
   border-bottom: 5px solid transparent;
   border-left: 6px solid var(--muted);
 }
-.panel.folded > .panel-body { display: none; }
+#hud.folded > .panel-body,
+#cam.folded > .panel-body,
+#memory.folded > .panel-body,
+#queue.folded > .panel-body,
+#trace.folded > .panel-body { display: none; }
 #hud.folded > header,
 #cam.folded > header,
 #memory.folded > header,
@@ -184,6 +188,7 @@ dd {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow: hidden;
 }
 #cam,
 #memory,
@@ -191,13 +196,16 @@ dd {
 #trace {
   display: flex;
   flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+  overflow: hidden;
   padding: 14px 16px 12px;
   background: linear-gradient(180deg, rgba(30,26,22,0.94), rgba(20,17,14,0.9));
   border: 1px solid var(--line);
   border-radius: 18px;
   box-shadow: 0 18px 60px rgba(0,0,0,0.24);
 }
-#cam { flex: 0 0 auto; }
 #cam.folded,
 #memory.folded,
 #queue.folded,
@@ -206,15 +214,18 @@ dd {
   flex: 0 0 auto;
   max-height: none;
   min-height: 0;
+  overflow: hidden;
 }
 #cam header,
 #memory header,
 #queue header,
 #trace header {
   display: flex;
+  flex: 0 0 auto;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 8px;
+  cursor: pointer;
 }
 #cam header .cam-actions {
   display: flex;
@@ -233,9 +244,17 @@ dd {
   font: inherit;
   border-radius: 999px;
 }
+#cam .panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
 #cam-stage {
   position: relative;
-  aspect-ratio: 16 / 10;
+  flex: 1 1 auto;
+  min-height: 0;
   border-radius: 12px;
   overflow: hidden;
   background: #0e0c0a;
@@ -261,8 +280,7 @@ dd {
 }
 #cam.on #cam-idle { display: none; }
 #trace {
-  flex: 1 1 auto;
-  min-height: 0;
+  overflow: hidden;
 }
 #trace .panel-body {
   flex: 1 1 auto;
@@ -270,18 +288,11 @@ dd {
   display: flex;
   flex-direction: column;
 }
-#memory > header {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: #1b1714;
-}
-#memory .panel-body {
-  overflow: visible;
-}
-#rail:has(#trace.folded) #memory {
+#memory .panel-body,
+#queue .panel-body {
   flex: 1 1 auto;
-  max-height: none;
+  min-height: 0;
+  overflow: auto;
 }
 #trace-meta {
   color: var(--muted);
@@ -289,7 +300,8 @@ dd {
   letter-spacing: 0.04em;
 }
 #trace-list {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   margin: 0;
   padding: 0 4px 0 0;
@@ -341,10 +353,7 @@ dd {
 }
 
 #memory {
-  flex: 0 0 auto;
-  max-height: 30%;
   min-height: 0;
-  overflow: auto;
 }
 #memory-meta {
   color: var(--muted);
@@ -439,13 +448,6 @@ dd {
 #memory-add button { flex: none; }
 
 #queue {
-  flex: 0 1 auto;
-  max-height: 32%;
-  min-height: 0;
-  overflow: hidden;
-}
-#queue .panel-body {
-  overflow: auto;
   min-height: 0;
 }
 #queue-meta {

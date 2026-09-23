@@ -22,10 +22,12 @@ import (
 	"github.com/jingx8885/lov-evo/internal/judge"
 	"github.com/jingx8885/lov-evo/internal/livevoice"
 	"github.com/jingx8885/lov-evo/internal/llm"
+	"github.com/jingx8885/lov-evo/internal/logq"
 	"github.com/jingx8885/lov-evo/internal/memory"
 	"github.com/jingx8885/lov-evo/internal/oracle"
 	"github.com/jingx8885/lov-evo/internal/persona"
 	"github.com/jingx8885/lov-evo/internal/planner"
+	"github.com/jingx8885/lov-evo/internal/react"
 	"github.com/jingx8885/lov-evo/internal/sense"
 	"github.com/jingx8885/lov-evo/internal/steering"
 	"github.com/jingx8885/lov-evo/internal/studio"
@@ -95,7 +97,7 @@ func Run(ctx context.Context, opt Options) error {
 	opt.voice = &voiceHold{}
 	media := mediaDir(opt)
 	st := window.NewStage(window.StageOptions{
-		Runner:  stageRunner(opt.BaseURL, opt.APIKey, media, llmClient),
+		Runner:  stageRunner(opt.BaseURL, opt.APIKey, media, runsDir(opt), llmClient, codexRunner(opt)),
 		Changed: func() { rememberStage(opt) },
 	})
 	reg := window.New(window.Options{
@@ -105,6 +107,12 @@ func Run(ctx context.Context, opt Options) error {
 	})
 	reg.Register(st)
 	opt.stageQ = st
+	go func() {
+		missing, err := studio.New(opt.BaseURL, opt.APIKey, media).Missing(ctx)
+		if err == nil && len(missing) > 0 {
+			opt.log("[studio] gateway does not offer: %s; those jobs will fail until it is enabled", strings.Join(missing, ", "))
+		}
+	}()
 	opt.deskWin = reg
 	if _, err := reg.Listen(ctx, "127.0.0.1:0"); err != nil {
 		opt.log("stage window disabled: %v", err)
@@ -1162,7 +1170,16 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 		}
 	case judge.ActPicture, judge.ActWatch, judge.ActListen:
 		ensurePercept(ctx, opt, lc, sess, slot, act)
-	case judge.ActReflect, judge.ActLook, judge.ActCodex:
+	case judge.ActCodex:
+		// Asking her to edit herself stays on the checked self path; any
+		// other program is written by Codex in a scratch dir on the queue.
+		_, goal, _ := slot.current()
+		if opt.stageQ != nil && !react.WantsChange(goal) {
+			startQueued(ctx, opt, nil, lc, sess, slot, act, continuing)
+		} else {
+			ensureSelf(ctx, opt, p, jc, lc, sess, slot, jd, act, mode)
+		}
+	case judge.ActReflect, judge.ActLook:
 		ensureSelf(ctx, opt, p, jc, lc, sess, slot, jd, act, mode)
 	case judge.ActCamera:
 		startSight(ctx, opt, p, sess, eye.SourceCamera, continuing, userText)
@@ -1257,18 +1274,25 @@ func runHands(ctx context.Context, opt Options, jc *jev.Client, lc *llm.Client, 
 		} else {
 			goalFn = func() string { _, g, _ := slot.current(); return g }
 		}
-		rep, err := desk.Run(ctx, desk.Options{
+		deskOpt := desk.Options{
 			Goal:       runGoal,
 			GoalFn:     goalFn,
 			Cwd:        cwd,
 			Driver:     deskDriver,
 			CodexModel: model,
 			MaxSteps:   maxSteps,
-			Jev:        jc,
-			LLM:        lc,
 			APIKey:     opt.APIKey,
 			LogFn:      func(s string) { opt.log("[desk] %s", s) },
-		})
+		}
+		// A nil pointer stored in the interface is not a client. Desk would
+		// snapshot the machine and then panic inside Evaluate.
+		if jc != nil {
+			deskOpt.Jev = jc
+		}
+		if lc != nil {
+			deskOpt.LLM = lc
+		}
+		rep, err := desk.Run(ctx, deskOpt)
 		if ctx.Err() != nil {
 			return
 		}
@@ -1480,16 +1504,23 @@ func startSight(ctx context.Context, opt Options, p *persona.Persona, sess *live
 			return
 		}
 		opt.log("[act] %s %s", source, clip(g.Caption, 80))
+		// One append only: the gateway may start a line on the first one,
+		// and a second append landing mid-line cuts it off.
+		spoke := nudgeLead + sightSpoke(source, g.Ready && strings.TrimSpace(g.Caption) != "", again, question)
+		note := spoke
 		if opt.sense != nil {
 			if felt := opt.sense.Felt(p, sense.Ask{Kind: sightAsk(source)}, source); felt != "" {
-				if err := opt.voice.live(sess).Steer(livevoice.FitTail(felt)); err != nil && !errors.Is(err, livevoice.ErrHeld) {
-					opt.log("[act] %s steer failed: %v", source, err)
-				} else if errors.Is(err, livevoice.ErrHeld) {
-					opt.log("[steer] queued")
-				}
+				note = livevoice.FitTail(felt + "\n" + spoke)
 			}
 		}
-		voiceNudge(opt, sess, sightSpoke(source, g.Ready && strings.TrimSpace(g.Caption) != "", again, question))
+		live := opt.voice.live(sess)
+		if live == nil {
+			opt.log("[act] %s steer skipped", source)
+		} else if err := live.Steer(note); errors.Is(err, livevoice.ErrHeld) {
+			opt.log("[steer] queued")
+		} else if err != nil {
+			opt.log("[act] %s steer failed: %v", source, err)
+		}
 	}()
 }
 
@@ -1550,7 +1581,10 @@ func glanceCommand(ctx context.Context, opt Options, p *persona.Persona, sess *l
 	}
 	opt.sense.Emit(sense.Event{Kind: sense.KindCommand, Summary: "/" + source})
 	if felt := opt.sense.Felt(p, sense.Ask{Kind: sightAsk(source)}, source); felt != "" {
-		if err := opt.voice.live(sess).Steer(livevoice.FitTail(felt)); errors.Is(err, livevoice.ErrHeld) {
+		live := opt.voice.live(sess)
+		if live == nil {
+			opt.log("[%s] steer skipped", source)
+		} else if err := live.Steer(livevoice.FitTail(felt)); errors.Is(err, livevoice.ErrHeld) {
 			opt.log("[steer] queued")
 		} else if err != nil {
 			opt.log("[%s] steer failed: %v", source, err)
@@ -1577,8 +1611,10 @@ func voiceNudge(opt Options, sess *livevoice.Session, text string) {
 	if text == "" {
 		return
 	}
-	voiceSteer(opt, sess, "Background only. Do not start speaking about this. Use it only if their latest utterance asked: "+text)
+	voiceSteer(opt, sess, nudgeLead+text)
 }
+
+const nudgeLead = "Background only. Do not start speaking about this. Use it only if their latest utterance asked: "
 
 // ensureDivine keeps one six-line plate for the open branch.
 // A follow-up rereads that plate. A new toss happens only when they ask.
@@ -1958,7 +1994,7 @@ func (o Options) log(format string, args ...any) {
 	if o.LogFn != nil {
 		o.LogFn(line)
 	} else {
-		fmt.Printf("%s\n", line)
+		logq.Println(line)
 	}
 	if o.sense != nil {
 		o.sense.Note(line)

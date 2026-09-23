@@ -221,6 +221,62 @@ func TestJevGateCooldownLeft(t *testing.T) {
 	}
 }
 
+func TestJevGateFailedFinishClearsCooldown(t *testing.T) {
+	g := newJevGate()
+	g.minInterval = 200 * time.Millisecond
+	if !g.claim("第一句没判成") {
+		t.Fatal("first claim")
+	}
+	g.finish("第一句没判成", false)
+	if g.cooling() || !g.claim("马上再说一句") {
+		t.Fatal("a failed judge should not start the cooldown")
+	}
+}
+
+func TestJevGateCooldownRetriesTheLatestTurn(t *testing.T) {
+	g := newJevGate()
+	g.minInterval = 40 * time.Millisecond
+	if !g.claim("第一句已经说完了") {
+		t.Fatal("first turn")
+	}
+	g.finish("第一句已经说完了", true)
+	if g.claim("第二句紧接着来了") {
+		t.Fatal("cooldown should block")
+	}
+	wait := g.cooldownLeft()
+	if wait <= 0 {
+		t.Fatal("expected a wait")
+	}
+	got := make(chan string, 2)
+	g.schedule(wait+20*time.Millisecond, "第二句紧接着来了", func() {
+		if g.claim("第二句紧接着来了") {
+			got <- "old"
+		}
+	})
+	g.schedule(wait+20*time.Millisecond, "更新的一句", func() {
+		if g.claim("更新的一句") {
+			got <- "new"
+			g.finish("更新的一句", true)
+		}
+	})
+	select {
+	case v := <-got:
+		if v != "new" {
+			t.Fatalf("retry ran %s", v)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("cooled turn was not retried")
+	}
+	select {
+	case v := <-got:
+		t.Fatalf("older retry also ran: %s", v)
+	case <-time.After(60 * time.Millisecond):
+	}
+	if g.claim("更新的一句") {
+		t.Fatal("the retried turn should count as judged")
+	}
+}
+
 func TestVoiceHoldPrefersTheLiveSession(t *testing.T) {
 	old := &livevoice.Session{}
 	var h *voiceHold

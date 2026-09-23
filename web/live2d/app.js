@@ -426,9 +426,11 @@
     document.querySelectorAll(".panel").forEach(function (panel) {
       const known = Object.prototype.hasOwnProperty.call(saved, panel.id);
       setFold(panel, known ? !!saved[panel.id] : !!foldDefault[panel.id], false);
-      const btn = panel.querySelector(":scope > header .fold");
-      if (!btn) return;
-      btn.addEventListener("click", function () {
+      const header = panel.querySelector(":scope > header");
+      if (!header) return;
+      header.addEventListener("click", function (ev) {
+        const other = ev.target.closest("button, a, input, select, textarea");
+        if (other && !other.classList.contains("fold")) return;
         setFold(panel, !panel.classList.contains("folded"), true);
       });
     });
@@ -749,6 +751,7 @@
     speech: "语音",
     song: "歌",
     llm: "笔记",
+    codex: "编程",
   };
   const QUEUE_STATUS = {
     queued: "排队",

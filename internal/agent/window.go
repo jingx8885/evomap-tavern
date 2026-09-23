@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/jingx8885/lov-evo/internal/desk"
 	"github.com/jingx8885/lov-evo/internal/judge"
 	"github.com/jingx8885/lov-evo/internal/livevoice"
 	"github.com/jingx8885/lov-evo/internal/llm"
@@ -59,12 +62,24 @@ func (h *voiceHold) nudge(opt Options, text string) {
 	voiceNudge(opt, s, text)
 }
 
-func mediaDir(opt Options) string {
-	dir := opt.RunsDir
-	if dir == "" {
-		dir = "runs"
+func runsDir(opt Options) string {
+	if opt.RunsDir == "" {
+		return "runs"
 	}
-	return filepath.Join(dir, "media")
+	return opt.RunsDir
+}
+
+func mediaDir(opt Options) string {
+	return filepath.Join(runsDir(opt), "media")
+}
+
+func codexRunner(opt Options) codexFunc {
+	model := opt.PlannerModel
+	if model == "" {
+		model = "gpt-5.6-luna"
+	}
+	h := desk.DefaultHost{CodexModel: model, APIKey: opt.APIKey}
+	return h.RunCodex
 }
 
 func windowView(s window.Spec) judge.WindowView {
@@ -112,8 +127,67 @@ func rememberStage(opt Options) {
 	})
 }
 
-func stageRunner(base, key, dir string, lc *llm.Client) window.Runner {
+// codexFunc runs the Codex CLI in cwd and returns its output.
+type codexFunc func(ctx context.Context, cwd, prompt string) (string, error)
+
+// codexJobPrompt keeps a spoken request inside its own scratch directory.
+func codexJobPrompt(goal string) string {
+	return "This directory is empty and is yours for this one request. " +
+		"Write a small, self-contained program for it here, plus a short README.md saying how to run it. " +
+		"Do not touch files outside this directory. Request: " + goal
+}
+
+// runCodexJob gives each job a fresh runs/codex/<stamp> directory.
+func runCodexJob(ctx context.Context, root, goal string, codex codexFunc, report func(string, float64)) (string, error) {
+	if codex == nil {
+		return "", fmt.Errorf("codex unavailable")
+	}
+	dir, err := filepath.Abs(filepath.Join(root, "codex", time.Now().Format("20060102-150405")))
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	report("writing", 0.2)
+	out, err := codex(ctx, dir, codexJobPrompt(goal))
+	if err != nil {
+		return "", fmt.Errorf("%w (%s)", err, clip(out, 200))
+	}
+	return "Written in " + dir + ". Files: " + listFiles(dir) + ". Codex said: " + clip(lastLines(out, 6), 300), nil
+}
+
+func listFiles(dir string) string {
+	var names []string
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || len(names) >= 12 {
+			return nil
+		}
+		if rel, err := filepath.Rel(dir, p); err == nil {
+			names = append(names, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	if len(names) == 0 {
+		return "(none)"
+	}
+	return strings.Join(names, ", ")
+}
+
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, " ")
+}
+
+func stageRunner(base, key, dir, root string, lc *llm.Client, codex codexFunc) window.Runner {
 	return func(ctx context.Context, kind, prompt string, report func(string, float64)) (string, string, error) {
+		if kind == window.KindCodex {
+			text, err := runCodexJob(ctx, root, prompt, codex, report)
+			return "", text, err
+		}
 		if kind == window.KindLLM {
 			if lc == nil {
 				return "", "", fmt.Errorf("llm client required")
@@ -150,8 +224,11 @@ func startQueued(ctx context.Context, opt Options, pl *planner.Planner, lc *llm.
 		return
 	}
 	jobKind := kind
-	if kind == judge.ActPlan {
+	switch kind {
+	case judge.ActPlan:
 		jobKind = window.KindLLM
+	case judge.ActCodex:
+		jobKind = window.KindCodex
 	}
 	_, _, note := slot.current()
 	if strings.HasPrefix(note, jobKind+" queued") {
@@ -170,7 +247,7 @@ func runQueued(ctx context.Context, opt Options, pl *planner.Planner, lc *llm.Cl
 		return
 	}
 	prompt := goal
-	if jobKind != window.KindLLM {
+	if jobKind != window.KindLLM && jobKind != window.KindCodex {
 		var completer studio.Completer
 		if lc != nil {
 			completer = lc
@@ -183,7 +260,11 @@ func runQueued(ctx context.Context, opt Options, pl *planner.Planner, lc *llm.Cl
 	if opt.sense != nil {
 		opt.sense.Emit(sense.Event{Kind: sense.KindStage, Summary: jobKind + " queued " + job.ID})
 	}
-	voiceNudge(opt, sess, "You just started a "+jobKind+". Tell them in one short in-character line that it has begun. Do not say it is ready. Do not describe a finished result.")
+	if jobKind == window.KindCodex {
+		voiceNudge(opt, sess, "You just queued a Codex job that writes the program in its own folder; it shows on the stage queue. Tell them in one short in-character line that it has begun. Do not say it is finished.")
+	} else {
+		voiceNudge(opt, sess, "You just started a "+jobKind+". Tell them in one short in-character line that it has begun. Do not say it is ready. Do not describe a finished result.")
+	}
 	done, err := opt.stageQ.Wait(ctx, job.ID)
 	if err != nil {
 		return
@@ -202,13 +283,31 @@ func runQueued(ctx context.Context, opt Options, pl *planner.Planner, lc *llm.Cl
 	case window.StatusReady:
 		opt.voice.nudge(opt, readyLine(jobKind, done))
 	case window.StatusFailed:
-		opt.voice.nudge(opt, "That did not finish. Say so simply, in character. Do not invent a file or a picture.")
+		opt.log("[stage] %s %s failed: %s", jobKind, job.ID, clip(done.Err, 300))
+		opt.voice.nudge(opt, failedLine(done.Err))
 	}
 	slot.closeIf(branchKind)
 }
 
+// failedLine gives her the real cause so she does not invent one.
+func failedLine(errText string) string {
+	reason := "the service returned an error"
+	low := strings.ToLower(errText)
+	switch {
+	case strings.Contains(low, "model_not_found") || strings.Contains(low, "no available channel"):
+		reason = "the gateway has no channel for that model, so it cannot be made right now; the gateway needs it enabled"
+	case strings.Contains(low, "timeout") || strings.Contains(low, "deadline"):
+		reason = "it timed out"
+	case strings.Contains(low, "codex cli not found"):
+		reason = "the Codex CLI is not installed on this machine"
+	}
+	return "That did not finish: " + reason + ". Say so simply, in character. Do not blame the page. Do not invent a file, a picture, or another tool."
+}
+
 func readyLine(kind string, job window.Job) string {
 	switch kind {
+	case window.KindCodex:
+		return "The Codex job finished and its result is on the stage queue. Tell them in one or two in-character sentences, only from this summary: " + clip(job.Text, 300) + " Do not read paths or file lists aloud unless they ask."
 	case window.KindLLM:
 		return "A note is on the stage window. Tell them you have it, in one or two in-character sentences. Do not read the note aloud as a list. Note: " + clip(job.Text, 240)
 	case window.KindImage:
@@ -452,7 +551,8 @@ func runStageJob(ctx context.Context, opt Options, lc *llm.Client, sess *livevoi
 	case window.StatusReady:
 		opt.voice.nudge(opt, readyLine(kind, done))
 	case window.StatusFailed:
-		opt.voice.nudge(opt, "That did not finish. Say so simply, in character. Do not invent a file or a picture.")
+		opt.log("[stage] %s %s failed: %s", kind, job.ID, clip(done.Err, 300))
+		opt.voice.nudge(opt, failedLine(done.Err))
 	}
 }
 

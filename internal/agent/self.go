@@ -105,12 +105,31 @@ func ensureSelf(ctx context.Context, opt Options, p *persona.Persona, jc *jev.Cl
 			return
 		}
 		slot.setNote(clip(rep.Note, 200))
-		opt.log("[self] %s status=%s", act, rep.Status)
-		if strings.TrimSpace(rep.Note) != "" {
-			voiceSteer(opt, sess, rep.Note)
+		opt.log("[self] %s status=%s changed=%v steps=%s", act, rep.Status, rep.Changed, stepNames(rep))
+		note := strings.TrimSpace(rep.Note)
+		if act == judge.ActCodex && !rep.Changed {
+			note = "Codex did not run this time. No file was written and nothing is queued."
 		}
-		voiceNudge(opt, sess, selfSpoke(rep))
+		if note != "" {
+			voiceSteer(opt, sess, note)
+		}
+		voiceNudge(opt, sess, selfSpokeFor(act, rep))
 	}()
+}
+
+func stepNames(rep *react.Report) string {
+	names := make([]string, 0, len(rep.Steps))
+	for _, s := range rep.Steps {
+		names = append(names, s.Step)
+	}
+	return strings.Join(names, ",")
+}
+
+func selfSpokeFor(act string, rep *react.Report) string {
+	if act == judge.ActCodex && (rep == nil || !rep.Changed) {
+		return "You did not start Codex and nothing was written. If they ask, say so plainly in character. Never claim it is running, queued, or finished."
+	}
+	return selfSpoke(rep)
 }
 
 func selfSpoke(rep *react.Report) string {

@@ -6,6 +6,7 @@ package livevoice
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptrace"
 	"net/textproto"
 	"net/url"
 	"sort"
@@ -28,6 +30,7 @@ import (
 
 	"github.com/jingx8885/lov-evo/internal/audio"
 	"github.com/jingx8885/lov-evo/internal/config"
+	"github.com/jingx8885/lov-evo/internal/logq"
 )
 
 // Event kinds delivered on Session.Events.
@@ -93,6 +96,16 @@ type Session struct {
 	duckMicUntil  atomic.Int64
 	inject        chan []byte
 	skipMic       bool
+	born          time.Time
+	iceAt         time.Time
+	callAt        time.Time
+	wsAt          time.Time
+	httpAt        time.Time
+	dnsAt         time.Time
+	dialAt        time.Time
+	tlsAt         time.Time
+	ttfbAt        time.Time
+	bodyAt        time.Time
 	offerAudio    string
 	answerAudio   string
 
@@ -147,6 +160,7 @@ func connect(ctx context.Context, baseURL, apiKey, instructions, voice string, s
 	if voice == "" {
 		voice = "cove"
 	}
+	born := time.Now()
 	s := &Session{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
@@ -157,6 +171,7 @@ func connect(ctx context.Context, baseURL, apiKey, instructions, voice string, s
 		player:  audio.NewPlayer(),
 		inject:  make(chan []byte, 1024),
 		skipMic: skipMic,
+		born:    born,
 	}
 	inner, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
@@ -201,10 +216,10 @@ func connect(ctx context.Context, baseURL, apiKey, instructions, voice string, s
 		}
 	}()
 	pc.OnICEConnectionStateChange(func(st webrtc.ICEConnectionState) {
-		fmt.Printf("[livevoice] ice %s\n", st)
+		logq.Printf("[livevoice] ice %s", st)
 	})
 	pc.OnConnectionStateChange(func(st webrtc.PeerConnectionState) {
-		fmt.Printf("[livevoice] pc %s\n", st)
+		logq.Printf("[livevoice] pc %s", st)
 		if st == webrtc.PeerConnectionStateFailed {
 			s.emit(Event{Kind: EventClosed, Err: fmt.Errorf("peer connection failed")})
 		}
@@ -245,6 +260,7 @@ func connect(ctx context.Context, baseURL, apiKey, instructions, voice string, s
 		pc.Close()
 		return nil, inner.Err()
 	}
+	s.iceAt = time.Now()
 
 	sdp := pc.LocalDescription().SDP
 	if !strings.HasSuffix(sdp, "\n") {
@@ -252,9 +268,10 @@ func connect(ctx context.Context, baseURL, apiKey, instructions, voice string, s
 	}
 	s.offerAudio = sdpAudioLines(sdp)
 	callID, answer, err := s.postCall(sdp, instructions)
+	s.callAt = time.Now()
 	if err != nil {
 		pc.Close()
-		return nil, err
+		return nil, fmt.Errorf("%w (ice %s, call %s)", err, s.iceAt.Sub(s.born).Round(time.Millisecond), s.callAt.Sub(s.iceAt).Round(time.Millisecond))
 	}
 	s.answerAudio = sdpAudioLines(answer)
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{
@@ -267,6 +284,7 @@ func connect(ctx context.Context, baseURL, apiKey, instructions, voice string, s
 	wsURL := strings.Replace(s.baseURL, "http", "ws", 1) + "/live/" + url.PathEscape(callID)
 	hdr := http.Header{"Authorization": {"Bearer " + apiKey}}
 	ws, _, err := websocket.DefaultDialer.DialContext(inner, wsURL, hdr)
+	s.wsAt = time.Now()
 	if err != nil {
 		pc.Close()
 		return nil, fmt.Errorf("ws dial: %w", err)
@@ -335,12 +353,36 @@ func (s *Session) postCall(sdp, instructions string) (callID, answer string, err
 	req.Header.Set("Authorization", "Bearer "+s.apiKey)
 	req.Header.Set("Content-Type", w.FormDataContentType())
 	req.Header.Set("Accept", "application/sdp")
+	s.httpAt = time.Now()
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		DNSDone: func(httptrace.DNSDoneInfo) {
+			if s.dnsAt.IsZero() {
+				s.dnsAt = time.Now()
+			}
+		},
+		ConnectDone: func(string, string, error) {
+			if s.dialAt.IsZero() {
+				s.dialAt = time.Now()
+			}
+		},
+		TLSHandshakeDone: func(tls.ConnectionState, error) {
+			if s.tlsAt.IsZero() {
+				s.tlsAt = time.Now()
+			}
+		},
+		GotFirstResponseByte: func() {
+			if s.ttfbAt.IsZero() {
+				s.ttfbAt = time.Now()
+			}
+		},
+	}))
 	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
 		return "", "", fmt.Errorf("call create: %w", err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	s.bodyAt = time.Now()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", "", fmt.Errorf("call create HTTP %d: %.400s", resp.StatusCode, raw)
 	}
@@ -446,11 +488,9 @@ func clipUplinkQueue(q [][]byte) (kept [][]byte, dropped int) {
 // seconds later and cuts the live utterance. Silence is sent only when
 // the queue is actually empty, so a frame that is 1ms late is not replaced.
 func (s *Session) uplinkMic(ctx context.Context, micFrames <-chan []byte, write func([]byte), silence []byte) {
-	var n, ducked, dropped, gated int
-	var maxRMS, rawPeak, windowRaw float64
+	var rawPeak float64
 	start := time.Now()
 	warned := false
-	lastLog := time.Now()
 	near := audio.NewNearGate()
 	var queued [][]byte
 	next := time.Now()
@@ -484,21 +524,15 @@ func (s *Session) uplinkMic(ctx context.Context, micFrames <-chan []byte, write 
 				if !ok {
 					return
 				}
-				if r := audio.UlawRMS(f); r > windowRaw {
-					windowRaw = r
-					if r > rawPeak {
-						rawPeak = r
-					}
+				if r := audio.UlawRMS(f); r > rawPeak {
+					rawPeak = r
 				}
 				passed := near.Filter(f)
 				if len(passed) == 0 {
-					gated++
 					continue
 				}
 				queued = append(queued, passed...)
-				var drop int
-				queued, drop = clipUplinkQueue(queued)
-				dropped += drop
+				queued, _ = clipUplinkQueue(queued)
 			default:
 				goto send
 			}
@@ -509,9 +543,6 @@ func (s *Session) uplinkMic(ctx context.Context, micFrames <-chan []byte, write 
 		if live {
 			frame = queued[0]
 			queued = queued[1:]
-			if r := audio.UlawRMS(frame); r > maxRMS {
-				maxRMS = r
-			}
 		}
 		if !warned && time.Since(start) > 6*time.Second && rawPeak < 0.002 {
 			warned = true
@@ -521,19 +552,8 @@ func (s *Session) uplinkMic(ctx context.Context, micFrames <-chan []byte, write 
 		}
 		if live && time.Now().UnixNano() < s.duckMicUntil.Load() {
 			frame = silence
-			ducked++
 		}
-		n++
 		write(frame)
-		if s.Verbose && time.Since(lastLog) >= 2*time.Second {
-			s.logf("uplink: frames=%d max_rms=%.4f near_drop=%d ducked=%d dropped=%d echo=%d format=%s",
-				n, maxRMS, gated, ducked, dropped, s.echoN.Swap(0), audio.MicFormat())
-			if windowRaw < 0.002 {
-				s.logf("uplink: mic looks silent; speech will not be recognized")
-			}
-			n, ducked, dropped, gated, maxRMS, windowRaw = 0, 0, 0, 0, 0, 0
-			lastLog = time.Now()
-		}
 	}
 }
 
@@ -549,6 +569,17 @@ func (s *Session) wsReader(ctx context.Context) {
 	}
 }
 
+// quietEvent is per-chunk traffic. The agent already prints the whole
+// user and assistant lines, so echoing every token only floods the console.
+func quietEvent(etype string) bool {
+	switch etype {
+	case "session.output_audio.delta", "session.input_audio.append",
+		"output_transcript.added", "input_transcript.added", "turn.delta":
+		return true
+	}
+	return false
+}
+
 // handleEvent parses one gateway event.
 func (s *Session) handleEvent(data []byte) {
 	var ev map[string]any
@@ -556,7 +587,7 @@ func (s *Session) handleEvent(data []byte) {
 		return
 	}
 	etype, _ := ev["type"].(string)
-	if s.Verbose && etype != "session.output_audio.delta" && etype != "session.input_audio.append" {
+	if s.Verbose && !quietEvent(etype) {
 		if tx := transcriptText(ev); tx != "" {
 			s.logf("event %s text=%q", etype, clipRunes(tx, 80))
 		} else if etype == "session.started" {
@@ -1144,7 +1175,7 @@ func (s *Session) PCM() []byte {
 // CallID is exposed for logging.
 func (s *Session) logf(format string, args ...any) {
 	if s.Verbose {
-		fmt.Printf("[livevoice] "+format+"\n", args...)
+		logq.Printf("[livevoice] "+format, args...)
 	}
 }
 

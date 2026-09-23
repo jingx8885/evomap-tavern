@@ -23,6 +23,7 @@ import (
 	"github.com/jingx8885/lov-evo/internal/judge"
 	"github.com/jingx8885/lov-evo/internal/livevoice"
 	"github.com/jingx8885/lov-evo/internal/llm"
+	"github.com/jingx8885/lov-evo/internal/logq"
 	"github.com/jingx8885/lov-evo/internal/memory"
 	"github.com/jingx8885/lov-evo/internal/oracle"
 	"github.com/jingx8885/lov-evo/internal/persona"
@@ -39,36 +40,41 @@ func main() {
 	args := os.Args[2:]
 	switch cmd {
 	case "run":
-		os.Exit(cmdRun(args))
+		exit(cmdRun(args))
 	case "speak":
-		os.Exit(cmdSpeak(args))
+		exit(cmdSpeak(args))
 	case "probe":
-		os.Exit(cmdProbe(args))
+		exit(cmdProbe(args))
 	case "judge":
-		os.Exit(cmdJudge(args))
+		exit(cmdJudge(args))
 	case "plan":
-		os.Exit(cmdPlan(args))
+		exit(cmdPlan(args))
 	case "desk":
-		os.Exit(cmdDesk(args))
+		exit(cmdDesk(args))
 	case "divine":
-		os.Exit(cmdDivine(args))
+		exit(cmdDivine(args))
 	case "codex":
-		os.Exit(cmdDesk(append([]string{"--driver", "codex"}, args...)))
+		exit(cmdDesk(append([]string{"--driver", "codex"}, args...)))
 	case "doctor":
-		os.Exit(cmdDoctor(args))
+		exit(cmdDoctor(args))
 	case "ctxprobe":
-		os.Exit(cmdCtxProbe(args))
+		exit(cmdCtxProbe(args))
 	case "live2d":
-		os.Exit(cmdLive2D(args))
+		exit(cmdLive2D(args))
 	case "loopprobe":
-		os.Exit(cmdLoopProbe(args))
+		exit(cmdLoopProbe(args))
 	case "sense":
-		os.Exit(cmdSense(args))
+		exit(cmdSense(args))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", cmd)
 		usage()
 		os.Exit(2)
 	}
+}
+
+func exit(code int) {
+	logq.Flush(time.Second)
+	os.Exit(code)
 }
 
 func usage() {

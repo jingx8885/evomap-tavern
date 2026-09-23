@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -13,6 +14,8 @@ const (
 	KindSpeech = "speech"
 	KindSong   = "song"
 	KindLLM    = "llm"
+	// KindCodex is a Codex CLI run in its own scratch directory.
+	KindCodex = "codex"
 
 	StatusQueued   = "queued"
 	StatusRunning  = "running"
@@ -49,7 +52,13 @@ type Job struct {
 	Text   string  `json:"text,omitempty"`
 	Look   string  `json:"look,omitempty"`
 	Err    string  `json:"err,omitempty"`
+	// Unix milliseconds; zero until the job reaches that point.
+	Created int64 `json:"created,omitempty"`
+	Started int64 `json:"started,omitempty"`
+	Ended   int64 `json:"ended,omitempty"`
 }
+
+func nowMS() int64 { return time.Now().UnixMilli() }
 
 // Runner performs one job. report may be called as it advances.
 // file is a base name under the media dir; text is a note.
@@ -233,6 +242,7 @@ func (s *Stage) cancelLocked(id string) {
 		case StatusQueued:
 			s.jobs[i].Status = StatusCanceled
 			s.jobs[i].Detail = "canceled"
+			s.jobs[i].Ended = nowMS()
 			s.deliverLocked(s.jobs[i])
 		default:
 			if cancel := s.running[id]; cancel != nil {
@@ -253,13 +263,15 @@ func (s *Stage) Enqueue(kind, prompt string) Job {
 		ID:     fmt.Sprintf("j%d", s.seq),
 		Kind:   kind,
 		Prompt: prompt,
-		Status: StatusQueued,
-		Detail: "queued",
+		Status:  StatusQueued,
+		Detail:  "queued",
+		Created: nowMS(),
 	}
 	if prompt == "" || !knownKind(kind) {
 		job.Status = StatusFailed
 		job.Err = "bad job"
 		job.Detail = "failed"
+		job.Ended = job.Created
 	}
 	s.jobs = append(s.jobs, job)
 	s.trimLocked()
@@ -279,7 +291,7 @@ func (s *Stage) Enqueue(kind, prompt string) Job {
 
 func knownKind(kind string) bool {
 	switch kind {
-	case KindImage, KindVideo, KindSpeech, KindSong, KindLLM:
+	case KindImage, KindVideo, KindSpeech, KindSong, KindLLM, KindCodex:
 		return true
 	default:
 		return false
@@ -403,6 +415,7 @@ func (s *Stage) claim() (Job, context.Context, bool) {
 		s.jobs[i].Status = StatusRunning
 		s.jobs[i].Detail = "running"
 		s.jobs[i].Ratio = 0.05
+		s.jobs[i].Started = nowMS()
 		ctx, cancel := context.WithCancel(s.ctx)
 		s.running[s.jobs[i].ID] = cancel
 		job := s.jobs[i]
@@ -440,6 +453,7 @@ func (s *Stage) execute(ctx context.Context, job Job) {
 		delete(s.running, job.ID)
 	}
 	s.touchLocked(job.ID, func(j *Job) {
+		j.Ended = nowMS()
 		if ctx.Err() != nil {
 			j.Status = StatusCanceled
 			j.Detail = "canceled"
@@ -571,6 +585,7 @@ func (s *Stage) View() any {
 		"jobs":     jobs,
 		"theme":    s.theme,
 		"controls": controls,
+		"now":      nowMS(),
 	}
 }
 
