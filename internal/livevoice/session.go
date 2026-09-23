@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -83,6 +84,7 @@ type Session struct {
 	pcmBytes      atomic.Int64
 	pcmMu         sync.Mutex
 	pcmAll        []byte
+	pcmOff        atomic.Bool
 	playbackGate  audio.DownlinkGate
 	onPCMMu       sync.Mutex
 	onPCM         func([]byte)
@@ -116,9 +118,9 @@ type deferredNote struct {
 	text    string
 }
 
-// ErrHeld means a commentary nudge was not injected into the live line.
-// It waits until she is quiet, because that channel asks her to speak.
-// Developer steering is quiet context and is never held.
+// ErrHeld means a context append waited instead of cutting the live line.
+// Developer, commentary, and speakable notes share one queue and flush
+// together after downlink speech ends.
 var ErrHeld = errors.New("not injected into the live line")
 
 // speechTail is how long after the latest downlink voice the line
@@ -158,6 +160,13 @@ func connect(ctx context.Context, baseURL, apiKey, instructions, voice string, s
 	}
 	inner, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
+	ok := false
+	defer func() {
+		if !ok {
+			cancel()
+			s.player.Close()
+		}
+	}()
 
 	pc, err := newPCMUPeerConnection()
 	if err != nil {
@@ -227,7 +236,15 @@ func connect(ctx context.Context, baseURL, apiKey, instructions, voice string, s
 		pc.Close()
 		return nil, fmt.Errorf("set local: %w", err)
 	}
-	<-webrtc.GatheringCompletePromise(pc)
+	select {
+	case <-webrtc.GatheringCompletePromise(pc):
+	case <-time.After(15 * time.Second):
+		pc.Close()
+		return nil, fmt.Errorf("ice gathering timed out")
+	case <-inner.Done():
+		pc.Close()
+		return nil, inner.Err()
+	}
 
 	sdp := pc.LocalDescription().SDP
 	if !strings.HasSuffix(sdp, "\n") {
@@ -257,6 +274,7 @@ func connect(ctx context.Context, baseURL, apiKey, instructions, voice string, s
 	s.ws = ws
 	s.logf("call %s joined", callID)
 
+	ok = true
 	go s.wsReader(inner)
 	go s.uplink(inner)
 	return s, nil
@@ -428,11 +446,12 @@ func clipUplinkQueue(q [][]byte) (kept [][]byte, dropped int) {
 // seconds later and cuts the live utterance. Silence is sent only when
 // the queue is actually empty, so a frame that is 1ms late is not replaced.
 func (s *Session) uplinkMic(ctx context.Context, micFrames <-chan []byte, write func([]byte), silence []byte) {
-	var n, ducked, dropped int
-	var maxRMS, peakRMS float64
+	var n, ducked, dropped, gated int
+	var maxRMS, rawPeak, windowRaw float64
 	start := time.Now()
 	warned := false
 	lastLog := time.Now()
+	near := audio.NewNearGate()
 	var queued [][]byte
 	next := time.Now()
 	timer := time.NewTimer(audio.PCMUFrameDur)
@@ -465,7 +484,18 @@ func (s *Session) uplinkMic(ctx context.Context, micFrames <-chan []byte, write 
 				if !ok {
 					return
 				}
-				queued = append(queued, f)
+				if r := audio.UlawRMS(f); r > windowRaw {
+					windowRaw = r
+					if r > rawPeak {
+						rawPeak = r
+					}
+				}
+				passed := near.Filter(f)
+				if len(passed) == 0 {
+					gated++
+					continue
+				}
+				queued = append(queued, passed...)
 				var drop int
 				queued, drop = clipUplinkQueue(queued)
 				dropped += drop
@@ -482,11 +512,8 @@ func (s *Session) uplinkMic(ctx context.Context, micFrames <-chan []byte, write 
 			if r := audio.UlawRMS(frame); r > maxRMS {
 				maxRMS = r
 			}
-			if maxRMS > peakRMS {
-				peakRMS = maxRMS
-			}
 		}
-		if !warned && time.Since(start) > 6*time.Second && peakRMS < 0.002 {
+		if !warned && time.Since(start) > 6*time.Second && rawPeak < 0.002 {
 			warned = true
 			s.emit(Event{Kind: EventWarning, Err: fmt.Errorf(
 				"mic has produced only silence for 6s (%s); speech will not be recognized "+
@@ -499,12 +526,12 @@ func (s *Session) uplinkMic(ctx context.Context, micFrames <-chan []byte, write 
 		n++
 		write(frame)
 		if s.Verbose && time.Since(lastLog) >= 2*time.Second {
-			s.logf("uplink: frames=%d max_rms=%.4f ducked=%d dropped=%d echo=%d format=%s",
-				n, maxRMS, ducked, dropped, s.echoN.Swap(0), audio.MicFormat())
-			if maxRMS < 0.002 {
+			s.logf("uplink: frames=%d max_rms=%.4f near_drop=%d ducked=%d dropped=%d echo=%d format=%s",
+				n, maxRMS, gated, ducked, dropped, s.echoN.Swap(0), audio.MicFormat())
+			if windowRaw < 0.002 {
 				s.logf("uplink: mic looks silent; speech will not be recognized")
 			}
-			n, ducked, dropped, maxRMS = 0, 0, 0, 0
+			n, ducked, dropped, gated, maxRMS, windowRaw = 0, 0, 0, 0, 0, 0
 			lastLog = time.Now()
 		}
 	}
@@ -555,9 +582,11 @@ func (s *Session) handleEvent(data []byte) {
 			return
 		}
 		s.pcmBytes.Add(int64(len(pcm)))
-		s.pcmMu.Lock()
-		s.pcmAll = append(s.pcmAll, pcm...)
-		s.pcmMu.Unlock()
+		if !s.pcmOff.Load() {
+			s.pcmMu.Lock()
+			s.pcmAll = append(s.pcmAll, pcm...)
+			s.pcmMu.Unlock()
+		}
 		if audio.ChunkHasVoice(pcm) {
 			s.duckMic()
 			s.markSpeaking()
@@ -816,10 +845,24 @@ func (s *Session) InjectUlaw(frames [][]byte) error {
 }
 
 // Speak makes the assistant say text verbatim via the speakable channel.
-// Uplink RTP must already be flowing.
+// Uplink RTP must already be flowing. A line already in progress is
+// not cut; the text waits and merges with later speakable notes.
 func (s *Session) Speak(text string) error {
-	// Server VAD will hold speakable TTS while the uplink looks busy.
+	if s.hold("speakable", text) {
+		return ErrHeld
+	}
+	return s.sendSpeakable(text)
+}
+
+func (s *Session) sendSpeakable(text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
 	s.duckMicUntil.Store(time.Now().Add(4 * time.Second).UnixNano())
+	if s.contextSend != nil {
+		return s.contextSend("speakable", text)
+	}
 	return s.sendJSON(map[string]any{
 		"type":    "session.context.append",
 		"channel": "speakable",
@@ -860,13 +903,14 @@ func (s *Session) Respond() error {
 
 // Steer pushes behavioral guidance through the developer channel.
 // Upstream rejects session.update for instructions after initialization.
-// This channel is quiet context: the model may use it on a later reply,
-// and appending it does not ask her to speak or open another turn.
-// Send it while she is already talking. Holding it until the line ends
-// just drops the note she needed for this exchange.
+// Appending while she is talking still cuts the live line, so a note
+// waits, merges with later developer notes, and flushes when she is quiet.
 func (s *Session) Steer(guidance string) error {
 	if strings.TrimSpace(guidance) == "" {
 		return nil
+	}
+	if s.hold("developer", guidance) {
+		return ErrHeld
 	}
 	return s.sendContext("developer", guidance)
 }
@@ -885,8 +929,7 @@ func (s *Session) Speaking() bool {
 }
 
 // SetNote receives lines the session wants on the agent log,
-// such as a commentary nudge delivered after the line.
-// Developer steering is not deferred.
+// such as a queued note delivered after the line.
 func (s *Session) SetNote(fn func(string)) {
 	s.noteMu.Lock()
 	s.noteFn = fn
@@ -945,16 +988,38 @@ func (s *Session) enqueueLocked(channel, text string) {
 		if s.deferred[i].channel != channel {
 			continue
 		}
-		if channel == "commentary" {
-			s.deferred[i].text = text
-		} else {
-			s.deferred[i].text = s.deferred[i].text + "\n" + text
-		}
+		s.deferred[i].text = mergeNotes(s.deferred[i].text, text)
 		s.armDeferLocked()
 		return
 	}
 	s.deferred = append(s.deferred, deferredNote{channel: channel, text: text})
 	s.armDeferLocked()
+}
+
+func mergeNotes(old, add string) string {
+	add = strings.TrimSpace(add)
+	if add == "" {
+		return old
+	}
+	if old == "" {
+		return add
+	}
+	if old == add || strings.HasSuffix(old, "\n"+add) {
+		return old
+	}
+	return old + "\n" + add
+}
+
+func orderedDeferred(batch []deferredNote) []deferredNote {
+	if len(batch) < 2 {
+		return batch
+	}
+	out := append([]deferredNote(nil), batch...)
+	rank := map[string]int{"developer": 0, "commentary": 1, "speakable": 2}
+	sort.SliceStable(out, func(i, j int) bool {
+		return rank[out[i].channel] < rank[out[j].channel]
+	})
+	return out
 }
 
 func (s *Session) armDeferLocked() {
@@ -991,18 +1056,19 @@ func (s *Session) flushDeferred() {
 		s.deferTimer = nil
 	}
 	s.deferMu.Unlock()
-	for _, item := range batch {
-		// Only commentary is queued. A developer note here is quiet
-		// context that should have been sent immediately; deliver it
-		// without treating the flush as a new spoken turn.
-		if item.channel == "developer" {
-			if err := s.sendContext(item.channel, item.text); err != nil {
-				s.note(fmt.Sprintf("[steer] failed: %v", err))
-			}
-			continue
-		}
+	for _, item := range orderedDeferred(batch) {
 		text := item.text
-		if err := s.sendContext(item.channel, text); err != nil {
+		if item.channel != "speakable" {
+			// Newest notes are last in the merged blob; keep the tail.
+			text = FitTail(item.text)
+		}
+		var err error
+		if item.channel == "speakable" {
+			err = s.sendSpeakable(text)
+		} else {
+			err = s.sendContextFitted(item.channel, text)
+		}
+		if err != nil {
 			s.note(fmt.Sprintf("[%s] after line failed: %v", noteTag(item.channel), err))
 			continue
 		}
@@ -1018,10 +1084,22 @@ func noteTag(channel string) string {
 }
 
 func (s *Session) sendContext(channel, text string) error {
+	return s.sendContextFitted(channel, FitHead(text))
+}
+
+func (s *Session) sendContextFitted(channel, text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
 	if s.contextSend != nil {
 		return s.contextSend(channel, text)
 	}
-	return s.AppendContext(channel, text)
+	return s.sendJSON(map[string]any{
+		"type":    "session.context.append",
+		"channel": channel,
+		"content": []map[string]string{{"type": "input_text", "text": text}},
+	})
 }
 
 func (s *Session) sendJSON(v any) error {
@@ -1043,6 +1121,15 @@ func (s *Session) OnPCM(fn func([]byte)) {
 	s.onPCMMu.Lock()
 	s.onPCM = fn
 	s.onPCMMu.Unlock()
+}
+
+// DiscardPCM stops keeping downlink audio for PCM. A long call keeps
+// about 170MB per hour otherwise; only short CLI runs need the recording.
+func (s *Session) DiscardPCM() {
+	s.pcmOff.Store(true)
+	s.pcmMu.Lock()
+	s.pcmAll = nil
+	s.pcmMu.Unlock()
 }
 
 // PCM returns all downlink PCM so far (s16le 24kHz mono).
@@ -1094,8 +1181,11 @@ func (s *Session) Close() {
 		s.deferMu.Unlock()
 		s.cancel()
 		if s.ws != nil {
+			// gorilla allows one writer at a time; a steer may be mid-send.
+			s.sendMu.Lock()
 			_ = s.ws.WriteMessage(websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, "bye"))
+			s.sendMu.Unlock()
 			s.ws.Close()
 		}
 		if s.micStop != nil {

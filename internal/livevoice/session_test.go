@@ -7,6 +7,23 @@ import (
 	"time"
 )
 
+func TestDiscardPCMStopsRecording(t *testing.T) {
+	s := &Session{}
+	delta := `{"type":"session.output_audio.delta","delta":"AAAAAA=="}`
+	s.handleEvent([]byte(delta))
+	if len(s.PCM()) == 0 {
+		t.Fatal("recording is on by default")
+	}
+	s.DiscardPCM()
+	s.handleEvent([]byte(delta))
+	if len(s.PCM()) != 0 {
+		t.Fatalf("kept %d bytes after discard", len(s.PCM()))
+	}
+	if s.pcmBytes.Load() == 0 {
+		t.Fatal("byte count still tracks the downlink")
+	}
+}
+
 func TestFitAppendStaysUnderGatewayCap(t *testing.T) {
 	var b strings.Builder
 	for i := 0; i < 800; i++ {
@@ -164,7 +181,7 @@ func TestClipUplinkQueueKeepsTheLiveTail(t *testing.T) {
 	}
 }
 
-func TestSteerDuringSpeechIsSent(t *testing.T) {
+func TestSteerDuringSpeechWaitsAndMerges(t *testing.T) {
 	s := &Session{}
 	var sent []string
 	s.contextSend = func(channel, text string) error {
@@ -175,20 +192,20 @@ func TestSteerDuringSpeechIsSent(t *testing.T) {
 	if !s.Speaking() {
 		t.Fatal("assistant transcript should hold the line open")
 	}
-	if err := s.Steer("Stay in character. mode=continue"); err != nil {
+	if err := s.Steer("Stay in character. mode=continue"); !errors.Is(err, ErrHeld) {
 		t.Fatalf("steer while speaking: %v", err)
 	}
-	if err := s.Steer("You are still on reflect."); err != nil {
+	if err := s.Steer("You are still on reflect."); !errors.Is(err, ErrHeld) {
 		t.Fatalf("second steer: %v", err)
 	}
 	if err := s.Nudge("The coins are down. Say one short line."); !errors.Is(err, ErrHeld) {
 		t.Fatalf("nudge while speaking: %v", err)
 	}
-	if len(sent) != 2 {
-		t.Fatalf("injected during the line: %v", sent)
+	if err := s.Speak("先把这句说完。"); !errors.Is(err, ErrHeld) {
+		t.Fatalf("speak while speaking: %v", err)
 	}
-	if sent[0] != "developer:Stay in character. mode=continue" || sent[1] != "developer:You are still on reflect." {
-		t.Fatalf("developer notes: %v", sent)
+	if len(sent) != 0 {
+		t.Fatalf("injected during the line: %v", sent)
 	}
 	s.handleEvent([]byte(`{"type":"turn.done","role":"user","transcript":"再说一句"}`))
 	if !s.Speaking() {
@@ -204,10 +221,16 @@ func TestSteerDuringSpeechIsSent(t *testing.T) {
 	s.deferMu.Unlock()
 	s.flushDeferred()
 	if len(sent) != 3 {
-		t.Fatalf("sent %d notes, want two steers plus the nudge: %v", len(sent), sent)
+		t.Fatalf("sent %d notes, want merged developer, nudge, speakable: %v", len(sent), sent)
 	}
-	if sent[2] != "commentary:The coins are down. Say one short line." {
-		t.Fatalf("late note: %s", sent[2])
+	if sent[0] != "developer:Stay in character. mode=continue\nYou are still on reflect." {
+		t.Fatalf("merged developer: %s", sent[0])
+	}
+	if sent[1] != "commentary:The coins are down. Say one short line." {
+		t.Fatalf("late nudge: %s", sent[1])
+	}
+	if sent[2] != "speakable:先把这句说完。" {
+		t.Fatalf("late speakable: %s", sent[2])
 	}
 }
 

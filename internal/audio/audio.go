@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -702,6 +703,194 @@ func ChunkHasVoice(pcm []byte) bool {
 		}
 	}
 	return false
+}
+
+const (
+	nearFloorInit         = 0.010
+	nearFloorMin          = 0.004
+	nearFloorMax          = 0.120
+	nearFloorWarmup       = 25 // 500ms to learn the room before the gate opens
+	nearFloorWarmupAttack = 0.35
+	nearFloorAttack       = 0.03
+	nearFloorRelease      = 0.20
+	nearOpenRatio         = 3.5
+	nearOpenMin           = 0.028
+	nearOpenMax           = 0.40
+	nearCloseRatio        = 0.70
+	nearAttackFrames      = 2   // one loud frame is a click, not speech
+	nearHangoverFrames    = 15  // 300ms so a short pause stays one utterance
+	nearPreRollFrames     = 3   // 60ms so the opening consonant is kept
+	nearWarmupOpenRatio   = 8.0 // during warmup, only an obvious close voice opens
+	nearWarmupOpenMinMul  = 4.0
+)
+
+// NearGate keeps uplink audio that is louder than the room. A laptop
+// mic hears the whole room; close speech sits well above that floor.
+// Frames under the gate are dropped so the RTP path sends silence and
+// server VAD does not treat distant sound as a turn.
+//
+// TAVERN_MIC_NEAR scales the threshold (0.7 looser, 1.5 stricter).
+// off, 0, or false disables the gate.
+type NearGate struct {
+	floor    float64
+	scale    float64
+	seen     int
+	hot      int
+	quiet    int
+	open     bool
+	disabled bool
+	pre      [][]byte
+}
+
+// NewNearGate builds a gate for one uplink. The noise floor starts
+// near a quiet room and is replaced by what the mic actually hears.
+func NewNearGate() *NearGate {
+	g := &NearGate{floor: nearFloorInit, scale: 1}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TAVERN_MIC_NEAR"))) {
+	case "", "1":
+	case "off", "0", "false", "no":
+		g.disabled = true
+	default:
+		if v, err := strconv.ParseFloat(strings.TrimSpace(os.Getenv("TAVERN_MIC_NEAR")), 64); err == nil && v > 0 && v < 8 {
+			g.scale = v
+		}
+	}
+	return g
+}
+
+// Filter returns the PCMU frames to enqueue. A nil or empty result
+// means this frame stays off the uplink (the caller sends silence).
+func (g *NearGate) Filter(frame []byte) [][]byte {
+	if len(frame) == 0 {
+		return nil
+	}
+	if g == nil || g.disabled {
+		return [][]byte{frame}
+	}
+	if g.scale <= 0 {
+		g.scale = 1
+	}
+	rms := UlawRMS(frame)
+	g.observeFloor(rms)
+	openAt := g.openThreshold()
+
+	if g.open {
+		if rms >= openAt*nearCloseRatio {
+			g.quiet = 0
+			g.hot = nearAttackFrames
+			return [][]byte{frame}
+		}
+		g.hot = 0
+		g.quiet++
+		if g.quiet <= nearHangoverFrames {
+			return [][]byte{frame}
+		}
+		g.open = false
+		g.quiet = 0
+		g.pushPre(frame)
+		return nil
+	}
+
+	if rms >= openAt {
+		g.hot++
+	} else {
+		g.hot = 0
+	}
+	if g.hot >= nearAttackFrames {
+		g.open = true
+		g.quiet = 0
+		out := make([][]byte, 0, len(g.pre)+1)
+		out = append(out, g.pre...)
+		out = append(out, frame)
+		g.pre = nil
+		return out
+	}
+	g.pushPre(frame)
+	return nil
+}
+
+func (g *NearGate) threshold() float64 {
+	scale := g.scale
+	if scale <= 0 {
+		scale = 1
+	}
+	t := g.floor * nearOpenRatio * scale
+	minT := nearOpenMin * scale
+	maxT := nearOpenMax * scale
+	if t < minT {
+		t = minT
+	}
+	if t > maxT {
+		t = maxT
+	}
+	return t
+}
+
+// openThreshold is harder during the first half second, while the
+// floor is still catching a loud room. After that it sits a few times
+// above whatever the mic has been hearing.
+func (g *NearGate) openThreshold() float64 {
+	openAt := g.threshold()
+	if g.seen > nearFloorWarmup {
+		return openAt
+	}
+	if warm := g.warmupOpenLine(); warm > openAt {
+		return warm
+	}
+	return openAt
+}
+
+func (g *NearGate) warmupOpenLine() float64 {
+	scale := g.scale
+	if scale <= 0 {
+		scale = 1
+	}
+	warm := g.floor * nearWarmupOpenRatio * scale
+	minWarm := nearOpenMin * nearWarmupOpenMinMul * scale
+	if warm < minWarm {
+		warm = minWarm
+	}
+	return warm
+}
+
+func (g *NearGate) observeFloor(rms float64) {
+	g.seen++
+	sample := rms
+	if sample < nearFloorMin {
+		sample = nearFloorMin
+	}
+	if sample > nearFloorMax {
+		sample = nearFloorMax
+	}
+	if g.seen <= nearFloorWarmup {
+		// A steady hiss is the room, even when the mic is hot.
+		// A frame already loud enough to be close speech is not.
+		if rms <= g.warmupOpenLine() {
+			g.floor += nearFloorWarmupAttack * (sample - g.floor)
+		}
+		return
+	}
+	// While someone is close, leave the floor where the room put it.
+	if g.open {
+		return
+	}
+	if rms >= g.threshold() && sample >= g.floor {
+		return
+	}
+	alpha := nearFloorAttack
+	if sample < g.floor {
+		alpha = nearFloorRelease
+	}
+	g.floor += alpha * (sample - g.floor)
+}
+
+func (g *NearGate) pushPre(frame []byte) {
+	cp := make([]byte, len(frame))
+	copy(cp, frame)
+	g.pre = append(g.pre, cp)
+	if extra := len(g.pre) - nearPreRollFrames; extra > 0 {
+		g.pre = g.pre[extra:]
+	}
 }
 
 // MouthEnvelope is a synthetic speak/pause curve for --lipsync demos.

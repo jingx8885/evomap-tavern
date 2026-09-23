@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jingx8885/lov-evo/internal/eye"
+	"github.com/jingx8885/lov-evo/internal/livevoice"
 )
 
 func TestSightFollowUpNamesTheQuestion(t *testing.T) {
@@ -199,5 +200,40 @@ func TestJevGateCooldown(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if !g.claim("隔了一会儿再说") {
 		t.Fatal("claim after cooldown")
+	}
+}
+
+func TestJevGateCooldownLeft(t *testing.T) {
+	g := newJevGate()
+	g.minInterval = 60 * time.Millisecond
+	if g.cooldownLeft() != 0 {
+		t.Fatal("no call yet, nothing to wait for")
+	}
+	g.claim("第一句已经说完了")
+	g.finish("第一句已经说完了", true)
+	left := g.cooldownLeft()
+	if left <= 0 || left > g.minInterval {
+		t.Fatalf("left %s", left)
+	}
+	time.Sleep(70 * time.Millisecond)
+	if g.cooldownLeft() != 0 || g.cooling() {
+		t.Fatal("cooldown should be over")
+	}
+}
+
+func TestVoiceHoldPrefersTheLiveSession(t *testing.T) {
+	old := &livevoice.Session{}
+	var h *voiceHold
+	if h.live(old) != old {
+		t.Fatal("nil hold keeps the fallback")
+	}
+	h = &voiceHold{}
+	if h.live(old) != old {
+		t.Fatal("unbound hold keeps the fallback")
+	}
+	cur := &livevoice.Session{}
+	h.bind(cur)
+	if h.live(old) != cur {
+		t.Fatal("work that outlived a reconnect must reach the new call")
 	}
 }

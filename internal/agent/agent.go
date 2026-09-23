@@ -260,6 +260,9 @@ func Run(ctx context.Context, opt Options) error {
 
 	first := true
 	var lastErr error
+	// One branch slot for the whole run. A reconnect must not let a second
+	// hands task start while the first one is still clicking.
+	slot := &capabilitySlot{}
 	for {
 		if err := ctx.Err(); err != nil {
 			return opt.saveLog(mem, pl, lastErr)
@@ -287,6 +290,7 @@ func Run(ctx context.Context, opt Options) error {
 		}
 		opt.power.Arm(sess.Close)
 		sess.Verbose = opt.Verbose
+		sess.DiscardPCM()
 		if opt.avatarHub != nil {
 			sess.OnPCM(func(pcm []byte) {
 				// Mouth only: local winmm already plays this PCM. Sending it
@@ -317,12 +321,12 @@ func Run(ctx context.Context, opt Options) error {
 
 		if first {
 			if opt.Greeting && p.Greeting != "" {
-				if err := sess.Speak(p.Greeting); err != nil {
+				if err := sess.Speak(p.Greeting); err != nil && !errors.Is(err, livevoice.ErrHeld) {
 					opt.log("greeting failed: %v", err)
 				}
 			}
 			if s := strings.TrimSpace(opt.Say); s != "" {
-				if err := sess.Speak(s); err != nil {
+				if err := sess.Speak(s); err != nil && !errors.Is(err, livevoice.ErrHeld) {
 					opt.log("say failed: %v", err)
 				} else {
 					opt.log("say: %s", s)
@@ -331,7 +335,7 @@ func Run(ctx context.Context, opt Options) error {
 			first = false
 		}
 
-		res := pumpSession(ctx, opt, p, jevClient, llmClient, mem, pl, sess, cmds)
+		res := pumpSession(ctx, opt, p, jevClient, llmClient, mem, pl, sess, slot, cmds)
 		sess.Close()
 		opt.power.Disarm()
 		opt.sense.Set(func(l *sense.Live) { l.Voice = "down" })
@@ -367,7 +371,7 @@ type pumpResult struct {
 
 func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
 	jevClient *jev.Client, llmClient *llm.Client, mem *memory.Memory, pl *planner.Planner,
-	sess *livevoice.Session, cmds <-chan string) pumpResult {
+	sess *livevoice.Session, slot *capabilitySlot, cmds <-chan string) pumpResult {
 	if opt.voice != nil {
 		opt.voice.bind(sess)
 		defer opt.voice.bind(nil)
@@ -377,7 +381,10 @@ func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
 	var lastTurnAt time.Time
 	var lastPartial string
 	gate := newJevGate()
-	slot := &capabilitySlot{}
+	// A judge timer that fires after the drop would steer a closed session.
+	defer gate.cancelTimer()
+	// armJudge waits out a burst of turn.done slices, then judges once.
+	// Partial transcripts must not call it.
 	armJudge := func(text string) {
 		if !judgeWorth(text) {
 			return
@@ -436,7 +443,9 @@ func pumpSession(ctx context.Context, opt Options, p *persona.Persona,
 						lastPartial = shown
 						opt.log("[user~] %s", shown)
 					}
-					armJudge(ev.Text)
+					// A pause in the partial used to be judged as a finished
+					// turn. Developer steering then landed while they were
+					// still talking, and that channel does not make her speak.
 				}
 			case livevoice.EventWarning:
 				opt.log("[voice warning] %v", ev.Err)
@@ -604,9 +613,19 @@ func (g *jevGate) claimEpoch(text string, speculative bool) (bool, uint64) {
 }
 
 func (g *jevGate) cooling() bool {
+	return g.cooldownLeft() > 0
+}
+
+func (g *jevGate) cooldownLeft() time.Duration {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.minInterval > 0 && !g.lastCall.IsZero() && time.Since(g.lastCall) < g.minInterval
+	if g.minInterval <= 0 || g.lastCall.IsZero() {
+		return 0
+	}
+	if left := g.minInterval - time.Since(g.lastCall); left > 0 {
+		return left
+	}
+	return 0
 }
 
 func (g *jevGate) current(epoch uint64) bool {
@@ -826,9 +845,9 @@ func (s *capabilitySlot) endComputer(gen int) {
 // processTurn runs the one turn Jev, steering, then the capability that Jev picked.
 // Partial transcripts do not call Jev. turn.done does, at most once per jevMinInterval.
 // Tool side effects run only after a successful final judgment.
-// Steering and branch notes share one developer inject. It is quiet
-// context and lands even if she is already speaking. Commentary is the
-// channel that asks her to talk, and that one waits out the current line.
+// Steering and branch notes share one developer inject. If she is still
+// speaking, livevoice queues the note and merges later ones, then flushes
+// after the line. Commentary and speakable wait on the same queue.
 func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 	jc *jev.Client, lc *llm.Client, mem *memory.Memory, pl *planner.Planner,
 	sess *livevoice.Session, gate *jevGate, slot *capabilitySlot, userText string, final bool) {
@@ -943,11 +962,10 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 			}
 			// The gateway rejects one append over 500 tokens. The scene
 			// note and the observation (log, camera, screen) go separately
-			// so neither one crowds the other out. Both are developer
-			// context: send them while she is speaking. That channel does
-			// not open another turn.
+			// so neither one crowds the other out. While she is speaking
+			// they queue and merge into one developer flush.
 			if err := sess.Steer(livevoice.FitHead(note)); errors.Is(err, livevoice.ErrHeld) {
-				opt.log("[steer] skipped mode=%s", mode)
+				opt.log("[steer] queued mode=%s", mode)
 				opt.sense.Emit(sense.Event{Kind: sense.KindSteer, Summary: mode})
 			} else if err != nil {
 				opt.log("[steer] failed: %v", err)
@@ -959,7 +977,7 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 				if err := sess.Steer(livevoice.FitTail(felt)); err != nil && !errors.Is(err, livevoice.ErrHeld) {
 					opt.log("[steer] observe failed: %v", err)
 				} else if errors.Is(err, livevoice.ErrHeld) {
-					opt.log("[steer] observe skipped")
+					opt.log("[steer] observe queued")
 				}
 			}
 			gate.remember(jd)
@@ -980,9 +998,19 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 				if err := sess.Steer(livevoice.FitTail(felt)); err != nil && !errors.Is(err, livevoice.ErrHeld) {
 					opt.log("[steer] observe failed: %v", err)
 				} else if errors.Is(err, livevoice.ErrHeld) {
-					opt.log("[steer] observe skipped")
+					opt.log("[steer] observe queued")
 				}
 			}
+		}
+		// Dropping a cooled turn lost requests said a few seconds after
+		// the last call. Judge the latest one once the interval has passed;
+		// a newer turn.done replaces it, so the rate stays the same.
+		if wait := gate.cooldownLeft(); wait > 0 {
+			opt.log("[judge] cooling; retry in %s", wait.Round(100*time.Millisecond))
+			gate.schedule(wait+50*time.Millisecond, userText, func() {
+				processTurn(ctx, opt, p, jc, lc, mem, pl, sess, gate, slot, userText, true)
+			})
+			return
 		}
 	}
 	if !final {
@@ -1001,7 +1029,7 @@ func processTurn(ctx context.Context, opt Options, p *persona.Persona,
 			if note, ok := pl.ConsumeNudge(before); ok {
 				quiet := "A plan note is ready. Do not bring it up on your own. Use it only if they ask what you are thinking: " + note
 				if err := sess.Steer(quiet); errors.Is(err, livevoice.ErrHeld) {
-					opt.log("[steer] skipped")
+					opt.log("[steer] queued")
 				} else if err != nil {
 					opt.log("[plan] steer failed: %v", err)
 				} else {
@@ -1454,10 +1482,10 @@ func startSight(ctx context.Context, opt Options, p *persona.Persona, sess *live
 		opt.log("[act] %s %s", source, clip(g.Caption, 80))
 		if opt.sense != nil {
 			if felt := opt.sense.Felt(p, sense.Ask{Kind: sightAsk(source)}, source); felt != "" {
-				if err := sess.Steer(livevoice.FitTail(felt)); err != nil && !errors.Is(err, livevoice.ErrHeld) {
+				if err := opt.voice.live(sess).Steer(livevoice.FitTail(felt)); err != nil && !errors.Is(err, livevoice.ErrHeld) {
 					opt.log("[act] %s steer failed: %v", source, err)
 				} else if errors.Is(err, livevoice.ErrHeld) {
-					opt.log("[steer] skipped")
+					opt.log("[steer] queued")
 				}
 			}
 		}
@@ -1522,8 +1550,8 @@ func glanceCommand(ctx context.Context, opt Options, p *persona.Persona, sess *l
 	}
 	opt.sense.Emit(sense.Event{Kind: sense.KindCommand, Summary: "/" + source})
 	if felt := opt.sense.Felt(p, sense.Ask{Kind: sightAsk(source)}, source); felt != "" {
-		if err := sess.Steer(livevoice.FitTail(felt)); errors.Is(err, livevoice.ErrHeld) {
-			opt.log("[steer] skipped")
+		if err := opt.voice.live(sess).Steer(livevoice.FitTail(felt)); errors.Is(err, livevoice.ErrHeld) {
+			opt.log("[steer] queued")
 		} else if err != nil {
 			opt.log("[%s] steer failed: %v", source, err)
 		}
@@ -1531,11 +1559,12 @@ func glanceCommand(ctx context.Context, opt Options, p *persona.Persona, sess *l
 }
 
 func voiceSteer(opt Options, sess *livevoice.Session, text string) {
+	sess = opt.voice.live(sess)
 	if sess == nil || strings.TrimSpace(text) == "" {
 		return
 	}
 	if err := sess.Steer(text); errors.Is(err, livevoice.ErrHeld) {
-		opt.log("[steer] skipped")
+		opt.log("[steer] queued")
 	} else if err != nil {
 		opt.log("[act] steer failed: %v", err)
 	}
@@ -1588,7 +1617,7 @@ func ensureDivine(ctx context.Context, opt Options, p *persona.Persona, lc *llm.
 	}
 	go func() {
 		defer slot.endComputer(gen)
-		runCtx := slot.bind(context.Background())
+		runCtx := slot.bind(ctx)
 		runOracle(runCtx, opt, p, lc, sess, goal, plateText, glance)
 	}()
 }
@@ -1672,14 +1701,14 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 		opt.sense.Emit(sense.Event{Kind: sense.KindCommand, Summary: "/sense"})
 		if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskBody}, ""); felt != "" {
 			if err := sess.Steer(felt); errors.Is(err, livevoice.ErrHeld) {
-				opt.log("[steer] skipped")
+				opt.log("[steer] queued")
 			} else if err != nil {
 				opt.log("[sense] steer failed: %v", err)
 			}
 		}
 		if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskLog}, "log"); felt != "" {
 			if err := sess.Steer(felt); errors.Is(err, livevoice.ErrHeld) {
-				opt.log("[steer] skipped")
+				opt.log("[steer] queued")
 			} else if err != nil {
 				opt.log("[sense] log steer failed: %v", err)
 			}
@@ -1699,26 +1728,30 @@ func handleCommand(ctx context.Context, line string, p *persona.Persona, pl *pla
 		opt.sense.Emit(sense.Event{Kind: sense.KindLook, Summary: view.Path})
 		if felt := opt.sense.Felt(p, sense.Ask{Kind: sense.AskFile, File: view.Path}, ""); felt != "" {
 			if err := sess.Steer(felt); errors.Is(err, livevoice.ErrHeld) {
-				opt.log("[steer] skipped")
+				opt.log("[steer] queued")
 			} else if err != nil {
 				opt.log("[look] steer failed: %v", err)
 			}
 		}
+	// A glance waits for a frame and a vision call; the event loop must
+	// keep draining turn.done meanwhile.
 	case line == "/camera", line == "/see camera":
-		glanceCommand(ctx, opt, p, sess, eye.SourceCamera)
+		go glanceCommand(opt.runCtx(ctx), opt, p, sess, eye.SourceCamera)
 	case line == "/screen", line == "/see screen":
-		glanceCommand(ctx, opt, p, sess, eye.SourceScreen)
+		go glanceCommand(opt.runCtx(ctx), opt, p, sess, eye.SourceScreen)
 	case line == "/shot", line == "/see shot":
-		glanceCommand(ctx, opt, p, sess, eye.SourceShot)
+		go glanceCommand(opt.runCtx(ctx), opt, p, sess, eye.SourceShot)
 	case line == "/see":
 		opt.log("camera, screen, and a screenshot of herself are separate: /camera or /screen or /shot")
 	case strings.HasPrefix(line, "/say "):
-		if err := sess.Speak(strings.TrimPrefix(line, "/say ")); err != nil {
+		if err := sess.Speak(strings.TrimPrefix(line, "/say ")); errors.Is(err, livevoice.ErrHeld) {
+			opt.log("[say] queued")
+		} else if err != nil {
 			opt.log("speak failed: %v", err)
 		}
 	case strings.HasPrefix(line, "/steer "):
 		if err := sess.Steer(strings.TrimPrefix(line, "/steer ")); errors.Is(err, livevoice.ErrHeld) {
-			opt.log("[steer] skipped")
+			opt.log("[steer] queued")
 		} else if err != nil {
 			opt.log("steer failed: %v", err)
 		}

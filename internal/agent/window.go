@@ -32,6 +32,20 @@ func (h *voiceHold) bind(s *livevoice.Session) {
 	h.mu.Unlock()
 }
 
+// live returns the bound session, or fallback when none is bound.
+// Async work outlives a reconnect and must reach the new call.
+func (h *voiceHold) live(fallback *livevoice.Session) *livevoice.Session {
+	if h == nil {
+		return fallback
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.sess != nil {
+		return h.sess
+	}
+	return fallback
+}
+
 func (h *voiceHold) nudge(opt Options, text string) {
 	if h == nil {
 		return

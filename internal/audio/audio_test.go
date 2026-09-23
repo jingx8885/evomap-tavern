@@ -255,6 +255,95 @@ func TestTonePCM(t *testing.T) {
 	}
 }
 
+func ulawAt(sample int16) []byte {
+	pcm := make([]byte, PCMUFrameBytes*2)
+	for i := 0; i < len(pcm); i += 2 {
+		binary.LittleEndian.PutUint16(pcm[i:], uint16(sample))
+	}
+	return MuLawEncodeBytes(pcm)
+}
+
+func TestNearGateDropsRoomAndKeepsCloseSpeech(t *testing.T) {
+	g := &NearGate{floor: nearFloorInit, scale: 1}
+	room := ulawAt(700)
+	roomRMS := UlawRMS(room)
+	if roomRMS < 0.015 || roomRMS > 0.035 {
+		t.Fatalf("room rms=%v", roomRMS)
+	}
+	for i := 0; i < nearFloorWarmup+30; i++ {
+		if got := g.Filter(room); len(got) != 0 {
+			t.Fatalf("room frame %d leaked (%d frames, rms=%.4f floor=%.4f)", i, len(got), roomRMS, g.floor)
+		}
+	}
+	voice := ulawAt(6000)
+	if UlawRMS(voice) < 0.12 {
+		t.Fatalf("voice rms=%v", UlawRMS(voice))
+	}
+	if got := g.Filter(voice); len(got) != 0 {
+		t.Fatal("a single loud frame is a click, not a turn")
+	}
+	got := g.Filter(voice)
+	if len(got) < 2 {
+		t.Fatalf("close speech should open with preroll, got %d", len(got))
+	}
+	silence := bytes.Repeat([]byte{SilenceByte}, PCMUFrameBytes)
+	passed := 0
+	for i := 0; i < nearHangoverFrames+5; i++ {
+		if len(g.Filter(silence)) > 0 {
+			passed++
+		}
+	}
+	if passed != nearHangoverFrames {
+		t.Fatalf("hangover passed %d want %d", passed, nearHangoverFrames)
+	}
+}
+
+func TestNearGateOpensImmediatelyForCloseVoice(t *testing.T) {
+	g := &NearGate{floor: nearFloorInit, scale: 1}
+	voice := ulawAt(8000)
+	if len(g.Filter(voice)) != 0 {
+		t.Fatal("first frame should arm, not open")
+	}
+	got := g.Filter(voice)
+	if len(got) < 2 {
+		t.Fatalf("a voice well above the room should open during warmup, got %d", len(got))
+	}
+}
+
+func TestNearGateHoldsOutAHotRoom(t *testing.T) {
+	g := &NearGate{floor: nearFloorInit, scale: 1}
+	room := ulawAt(2600)
+	roomRMS := UlawRMS(room)
+	if roomRMS < 0.06 || roomRMS > 0.12 {
+		t.Fatalf("hot room rms=%v", roomRMS)
+	}
+	for i := 0; i < nearFloorWarmup+40; i++ {
+		if got := g.Filter(room); len(got) != 0 {
+			t.Fatalf("hot room frame %d leaked (rms=%.4f floor=%.4f)", i, roomRMS, g.floor)
+		}
+	}
+	voice := ulawAt(14000)
+	if UlawRMS(voice) < g.threshold() {
+		t.Fatalf("voice rms=%v below threshold %v", UlawRMS(voice), g.threshold())
+	}
+	if len(g.Filter(voice)) != 0 {
+		t.Fatal("first close frame should only arm the gate")
+	}
+	if len(g.Filter(voice)) < 2 {
+		t.Fatal("speech louder than the hot room should open")
+	}
+}
+
+func TestNearGateDisabledPassesRoom(t *testing.T) {
+	t.Setenv("TAVERN_MIC_NEAR", "off")
+	g := NewNearGate()
+	room := ulawAt(700)
+	got := g.Filter(room)
+	if len(got) != 1 || len(got[0]) != PCMUFrameBytes {
+		t.Fatalf("disabled gate dropped audio: %#v", got)
+	}
+}
+
 func TestUlawRMSSilence(t *testing.T) {
 	ulaw := bytes.Repeat([]byte{SilenceByte}, PCMUFrameBytes)
 	if r := UlawRMS(ulaw); r != 0 {
