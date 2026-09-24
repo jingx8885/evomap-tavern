@@ -103,6 +103,7 @@ func Run(ctx context.Context, opt Options) error {
 	})
 	reg := window.New(window.Options{
 		MediaDir: media,
+		PlayDir:  filepath.Join(runsDir(opt), "codex"),
 		Open:     window.OpenBrowser,
 		LogFn:    func(s string) { opt.log("%s", s) },
 	})
@@ -1183,7 +1184,10 @@ func branchSteer(br judge.Branch, jd *judge.Judgment, mode string) string {
 		return " She is about to use this computer for what they just asked. You may say so in one short line. Do not claim it is already done."
 	}
 	if jd.CodexAllowed(mode) {
-		return " She is about to change her own source for what they just asked. You may say she has started. Do not claim it is already done."
+		if react.WantsChange(jd.UserText) {
+			return " She is about to change her own source for what they just asked. You may say she has started. Do not claim it is already done."
+		}
+		return " She is about to have Codex write that program in its own folder. You may say she has started. Do not claim it is already done."
 	}
 	if jd.MediaAllowed(mode) {
 		return " She is about to make a " + jd.Act + " for what they just asked. You may say she has started. Do not claim it is ready."
@@ -1310,8 +1314,13 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 		// Asking her to edit herself stays on the checked self path; any
 		// other program is written by Codex in a scratch dir on the queue.
 		_, goal, _ := slot.current()
-		if opt.stageQ != nil && !react.WantsChange(goal) {
-			startQueued(ctx, opt, nil, lc, sess, slot, act, continuing)
+		if !react.WantsChange(goal) {
+			if opt.stageQ != nil {
+				startQueued(ctx, opt, nil, lc, sess, slot, act, continuing)
+			} else {
+				opt.log("[act] codex program needs the stage queue")
+				slot.closeIf(act)
+			}
 		} else if selfAgain(jd, act, continuing) {
 			ensureSelf(ctx, opt, p, jc, lc, sess, slot, jd, act, mode)
 		} else {

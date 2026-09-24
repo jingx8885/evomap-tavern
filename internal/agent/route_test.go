@@ -229,6 +229,16 @@ func TestEachActEntersOnlyThatCapability(t *testing.T) {
 		}
 	})
 
+	t.Run("codex program without a queue does not read her source", func(t *testing.T) {
+		opt, slot, _ := routeRig(t, nil)
+		opt.stageQ = nil
+		jd := parsedTurn("你可以在Codex那里写一个贪吃蛇的游戏吗", "request", "neutral", judge.ActCodex, "", 0)
+		dispatchCapability(context.Background(), opt, routePersona(), nil, nil, memory.New(4), routePlanner(nil), nil, slot, jd, "continue", jd.UserText, true)
+		if sawSummary(opt.sense, "codex start") || slot.busy() {
+			t.Fatal("a program request took the self-edit path")
+		}
+	})
+
 	t.Run("reflect look codex", func(t *testing.T) {
 		for _, kind := range []string{judge.ActReflect, judge.ActLook, judge.ActCodex} {
 			opt, slot, _ := routeRig(t, nil)

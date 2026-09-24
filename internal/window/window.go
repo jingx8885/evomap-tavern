@@ -64,6 +64,7 @@ type Registry struct {
 	mods     map[string]*entry
 	focused  string
 	mediaDir string
+	playDir  string
 	url      string
 	openFn   func(string) error
 	logFn    func(string)
@@ -74,9 +75,11 @@ type Registry struct {
 // Options for the desktop shell.
 type Options struct {
 	MediaDir string
-	Open     func(string) error
-	LogFn    func(string)
-	Page     []byte
+	// PlayDir holds Codex scratch folders; /play serves pages from it.
+	PlayDir string
+	Open    func(string) error
+	LogFn   func(string)
+	Page    []byte
 }
 
 // New builds an empty desktop. Register modules, then Listen.
@@ -88,6 +91,7 @@ func New(opt Options) *Registry {
 	return &Registry{
 		mods:     map[string]*entry{},
 		mediaDir: opt.MediaDir,
+		playDir:  opt.PlayDir,
 		openFn:   opt.Open,
 		logFn:    opt.LogFn,
 		page:     page,
@@ -355,7 +359,57 @@ func (r *Registry) Handler() http.Handler {
 	mux.HandleFunc("/api/desktop", r.serveDesktop)
 	mux.HandleFunc("/api/feature", r.serveFeature)
 	mux.HandleFunc("/media/", r.serveMedia)
+	mux.HandleFunc("/play/", r.servePlay)
 	return mux
+}
+
+// servePlay serves a page Codex wrote, with its scripts and assets.
+// The sandbox header gives it an opaque origin, so even opened in its own
+// tab it cannot call /api on this server.
+func (r *Registry) servePlay(w http.ResponseWriter, req *http.Request) {
+	path, ok := r.playPath(strings.TrimPrefix(req.URL.Path, "/play/"))
+	if !ok {
+		http.NotFound(w, req)
+		return
+	}
+	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-pointer-lock")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	f, err := os.Open(path)
+	if err != nil {
+		http.NotFound(w, req)
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		http.NotFound(w, req)
+		return
+	}
+	// ServeFile would redirect .../index.html to the directory.
+	http.ServeContent(w, req, st.Name(), st.ModTime(), f)
+}
+
+func (r *Registry) playPath(name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.Contains(name, "..") || strings.ContainsAny(name, `\:`) {
+		return "", false
+	}
+	r.mu.Lock()
+	dir := r.playDir
+	r.mu.Unlock()
+	if dir == "" {
+		return "", false
+	}
+	full := filepath.Join(dir, filepath.FromSlash(name))
+	rel, err := filepath.Rel(dir, full)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return "", false
+	}
+	st, err := os.Stat(full)
+	if err != nil || st.IsDir() {
+		return "", false
+	}
+	return full, true
 }
 
 // serveFeature is a click on a card: that job goes to the right frame.

@@ -244,23 +244,45 @@ func codexJobPrompt(goal string) string {
 }
 
 // runCodexJob gives each job a fresh runs/codex/<stamp> directory.
-func runCodexJob(ctx context.Context, root, goal string, codex codexFunc, report func(string, float64)) (string, error) {
+// file is the page to play, relative to runs/codex, when Codex wrote one.
+func runCodexJob(ctx context.Context, root, goal string, codex codexFunc, report func(string, float64)) (file, text string, err error) {
 	if codex == nil {
-		return "", fmt.Errorf("codex unavailable")
+		return "", "", fmt.Errorf("codex unavailable")
 	}
-	dir, err := filepath.Abs(filepath.Join(root, "codex", time.Now().Format("20060102-150405")))
+	stamp := time.Now().Format("20060102-150405")
+	dir, err := filepath.Abs(filepath.Join(root, "codex", stamp))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+		return "", "", err
 	}
 	report("writing", 0.2)
 	out, err := codex(ctx, dir, codexJobPrompt(goal))
 	if err != nil {
-		return "", fmt.Errorf("%w (%s)", err, clip(out, 200))
+		return "", "", fmt.Errorf("%w (%s)", err, clip(out, 200))
 	}
-	return "Written in " + dir + ". Files: " + listFiles(dir) + ". Codex said: " + clip(lastLines(out, 6), 300), nil
+	if page := playablePage(dir); page != "" {
+		file = stamp + "/" + page
+	}
+	return file, "Written in " + dir + ". Files: " + listFiles(dir) + ". Codex said: " + clip(lastLines(out, 6), 300), nil
+}
+
+// playablePage is index.html, else the first top-level .html file.
+func playablePage(dir string) string {
+	if st, err := os.Stat(filepath.Join(dir, "index.html")); err == nil && !st.IsDir() {
+		return "index.html"
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".html") {
+			return e.Name()
+		}
+	}
+	return ""
 }
 
 func listFiles(dir string) string {
@@ -291,8 +313,7 @@ func lastLines(s string, n int) string {
 func stageRunner(base, key, dir, root string, lc *llm.Client, codex codexFunc) window.Runner {
 	return func(ctx context.Context, kind, prompt string, report func(string, float64)) (string, string, error) {
 		if kind == window.KindCodex {
-			text, err := runCodexJob(ctx, root, prompt, codex, report)
-			return "", text, err
+			return runCodexJob(ctx, root, prompt, codex, report)
 		}
 		if kind == window.KindLLM {
 			if lc == nil {
@@ -448,7 +469,11 @@ func stageStatus(opt Options, note string) string {
 func readyLine(kind string, job window.Job) string {
 	switch kind {
 	case window.KindCodex:
-		return "The Codex job finished and its result is on the stage queue. Tell them in one or two in-character sentences, only from this summary: " + clip(job.Text, 300) + " Do not read paths or file lists aloud unless they ask."
+		line := "The Codex job finished and its result is on the stage queue."
+		if job.File != "" {
+			line += " The page it wrote is open in the stage window's right frame, ready to play or use there."
+		}
+		return line + " Tell them in one or two in-character sentences, only from this summary: " + clip(job.Text, 300) + " Do not read paths or file lists aloud unless they ask."
 	case window.KindLLM:
 		return "A note is on the stage window. Tell them you have it, in one or two in-character sentences. Do not read the note aloud as a list. Note: " + clip(job.Text, 240)
 	case window.KindImage:

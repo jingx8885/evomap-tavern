@@ -490,6 +490,13 @@ dd {
 .q-err { color: #c47a6a; }
 #queue-list li.ready .q-status { color: #8fbf7a; }
 .q-prompt,
+.q-play {
+  display: inline-block;
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--accent, #7cc4ff);
+}
+
 .q-note,
 .q-err {
   margin: 4px 0 0;

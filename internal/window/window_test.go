@@ -233,6 +233,40 @@ func TestDesktopJSONMatchesGlance(t *testing.T) {
 	}
 }
 
+func TestPlayServesCodexPageSandboxed(t *testing.T) {
+	play := t.TempDir()
+	os.MkdirAll(filepath.Join(play, "20260924-090020", "js"), 0o755)
+	os.WriteFile(filepath.Join(play, "20260924-090020", "index.html"), []byte("<canvas></canvas>"), 0o644)
+	os.WriteFile(filepath.Join(play, "20260924-090020", "js", "game.js"), []byte("1"), 0o644)
+	os.WriteFile(filepath.Join(filepath.Dir(play), "secret.txt"), []byte("no"), 0o644)
+	reg := New(Options{PlayDir: play})
+	get := func(path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		reg.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec
+	}
+	rec := get("/play/20260924-090020/index.html")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "canvas") {
+		t.Fatalf("page %d %q", rec.Code, rec.Body.String())
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "sandbox allow-scripts") || strings.Contains(csp, "allow-same-origin") {
+		t.Fatalf("csp %q", csp)
+	}
+	if rec := get("/play/20260924-090020/js/game.js"); rec.Code != 200 {
+		t.Fatalf("asset %d", rec.Code)
+	}
+	for _, bad := range []string{"/play/..%2Fsecret.txt", "/play/../secret.txt", "/play/", "/play/20260924-090020"} {
+		if rec := get(bad); rec.Code == 200 {
+			t.Fatalf("%s served", bad)
+		}
+	}
+	rec = httptest.NewRecorder()
+	New(Options{}).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/play/20260924-090020/index.html", nil))
+	if rec.Code == 200 {
+		t.Fatal("no play dir, nothing served")
+	}
+}
+
 func TestCoveredGlanceHidesCards(t *testing.T) {
 	st := NewStage(StageOptions{Runner: func(ctx context.Context, kind, prompt string, report func(string, float64)) (string, string, error) {
 		return "", "note", nil

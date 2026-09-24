@@ -189,17 +189,18 @@ var knownAttend = map[string]bool{
 }
 
 // ActLabels is the only tool entry. One choice, then Go executes.
-// codex edits her own repo. computer_use is the desk loop for the machine.
+// codex writes a program in a scratch dir, or edits her own repo when asked
+// to change herself. computer_use is the desk loop for the machine.
 var ActLabels = map[string]string{
 	ActNone:        "Just talk. No tool, no desktop action, no extra look.",
 	ActPlan:        "A slower written plan or decision is needed. Not a desktop action.",
-	ActReflect:     "They asked her to notice herself: who she is, whether she can feel her voice, face, or mood, or a fault in her own log. Not a request to edit code, use the computer, or look at a screenshot of her appearance. A later step on this branch may read one file or remember one line.",
-	ActLook:        "They asked how she is built, what her own code does, or to feel a specific file in her body. This branch keeps reading. If they then ask her to change herself, a later step may edit one allowlisted file. It does not reload the running process.",
+	ActReflect:     "They asked her to notice herself: who she is, whether she can feel her voice, face, or mood, or a fault in her own log. Not a request to edit code, write a program, use the computer, or look at a screenshot of her appearance. A later step on this branch may read one file or remember one line.",
+	ActLook:        "They asked how she is built, what her own code does, or to feel a specific file in her body. This branch keeps reading her source. Not a request to write or generate a new program, game, or script; that is codex. If they then ask her to change herself, a later step may edit one allowlisted file. It does not reload the running process.",
 	ActCamera:      "They asked her to look through the camera now: at them, the room, or who is there. Not the computer screen, not a saved picture, and not a screenshot of her own face. A follow-up about that same view is not a new capability.",
 	ActScreen:      "They asked her to look at the computer screen now: which window or what is visible on the desktop. Not the room camera, not a saved picture, and not a screenshot of her own face. A follow-up about that same view is not a new capability.",
 	ActShot:        "They asked her to look at her own appearance now: what she looks like, her face, her clothes, her expression. One screenshot of herself on the stage. Not the room camera, not desktop window titles, not her source, and not a feeling-only check.",
-	ActCodex:       "They want her to change her own source. The runtime picks one allowlisted file, writes a strict intent, edits only that, then she feels the diff. Not a general desktop action, and not merely talking about code. The running process does not reload.",
-	ActComputerUse: "They want something done on this machine now that is not only editing her own repo: open an app, use a window, type, or act on the desktop. Not mere talk about computers.",
+	ActCodex:       "They want code written now: a new program, game, script, or tool (贪吃蛇, 小游戏, 写个程序, 用 Codex 写), or a change to her own source. A new program is written by Codex in its own fresh folder and does not read her source; a change to herself edits one allowlisted file. Not a general desktop action, and not merely talking about code.",
+	ActComputerUse: "They want something done on this machine now that is not writing code: open an app, use a window, type, or act on the desktop. Writing a new program or game is codex, not this. Not mere talk about computers.",
 	ActImage:       "They want a still picture made, or she is being asked to make one (a bouquet, a scene, an icon). Talking about a thing is not enough.",
 	ActVideo:       "They want a short moving clip made. Not a still picture, and not merely describing motion.",
 	ActSpeech:      "They want a separate spoken or voiced audio line made. Not her live voice, and not a song.",
@@ -267,14 +268,15 @@ func questions(p *persona.Persona, withPersonaFit bool, planNote string, br Bran
 				"Pick plan when a slower written decision is needed (a plan, a stuck " +
 				"conversation, something the live voice should not invent alone). " +
 				"Pick reflect when they ask her to notice herself, her mood, or a fault in her log. " +
-				"Pick look when they ask how she is built or what her own code does. " +
+				"Pick look when they ask how she is built or what her own code does, not when they want a new program written. " +
 				"Pick camera only when they asked her to look through the camera now. " +
 				"Pick screen only when they asked her to look at the computer screen now. " +
 				"Pick shot only when they asked her to look at her own appearance now. " +
 				"Camera, screen, and shot are different capabilities. Do not pick one to answer the other. " +
-				"Pick codex only when they want her to change her own source in this repo. One allowlisted file, then she feels the diff. " +
+				"Pick codex when they want code written now: a new program, game, script, or tool " +
+				"(for example 用 Codex 写个贪吃蛇), or a change to her own source. Mentioning Codex with a thing to build is codex. " +
 				"Pick computer_use only when they are asking her to act on this machine " +
-				"now in a way that is not just editing her repo. " +
+				"now in a way that is not writing code. " +
 				"Talking about code or computers is not codex or computer_use. " +
 				"Pick image only when a still picture should be generated. " +
 				"Pick video only when a short clip should be generated. " +
@@ -688,7 +690,7 @@ func (j *Judgment) ComputerUseAllowed(mode string) bool {
 	return j.actAllowed(mode, ActComputerUse)
 }
 
-// CodexAllowed is the outer latch for editing her own repo.
+// CodexAllowed is the outer latch for Codex: a scratch program or her own repo.
 func (j *Judgment) CodexAllowed(mode string) bool {
 	return j.actAllowed(mode, ActCodex)
 }

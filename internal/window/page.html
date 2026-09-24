@@ -91,6 +91,10 @@
   #feature img, #feature video { max-width: 100%; max-height: 100%; min-height: 0; object-fit: contain; border-radius: calc(var(--radius) / 1.5); background: var(--ground); }
   #feature a.full { display: contents; }
   #feature audio { width: min(520px, 100%); }
+  #feature .body.play { padding: 10px 12px; gap: 8px; }
+  #feature .body.play iframe { flex: 1; min-height: 0; width: 100%; border: 1px solid var(--line); border-radius: calc(var(--radius) / 1.5); background: #fff; }
+  #feature .body.play .bar { display: flex; justify-content: flex-end; font-size: 12px; }
+  #feature .body.play .bar a { color: var(--accent); }
   .glyph { font-size: 48px; color: var(--accent); opacity: .8; }
   .note { white-space: pre-wrap; word-break: break-word; font-size: 15px; line-height: 1.7; max-width: 72ch; }
   .note.mono { font: 13px/1.6 "Cascadia Mono", ui-monospace, monospace; }
@@ -141,6 +145,7 @@
       return n;
     }
     function media(file) { return "/media/" + encodeURIComponent(file); }
+    function play(file) { return "/play/" + file.split("/").map(encodeURIComponent).join("/"); }
     function pct(job) { return Math.round(Math.max(0, Math.min(1, job.ratio || 0)) * 100); }
     function now() { return Date.now() + skew; }
     function dur(ms) {
@@ -278,6 +283,19 @@
         au.preload = "metadata";
         au.src = media(job.file);
         body.appendChild(au);
+      } else if (job.status === "ready" && job.file && job.kind === "codex") {
+        body.className = "body play";
+        var bar = body.appendChild(el("div", "bar"));
+        var open = bar.appendChild(el("a", "", "在新标签页打开"));
+        open.href = play(job.file);
+        open.target = "_blank";
+        open.rel = "noopener";
+        var fr = el("iframe");
+        fr.title = job.prompt || "codex";
+        fr.setAttribute("sandbox", "allow-scripts allow-pointer-lock");
+        fr.src = play(job.file);
+        fr.addEventListener("load", function () { try { fr.focus(); } catch (e) {} });
+        body.appendChild(fr);
       } else if (job.status === "ready" && job.text) {
         body.appendChild(el("div", "note" + (job.kind === "codex" ? " mono" : ""), job.text));
       } else if (job.status === "running") {

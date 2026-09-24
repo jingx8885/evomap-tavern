@@ -866,6 +866,17 @@
         audio.controls = true;
         audio.src = src;
         li.appendChild(audio);
+      } else if (job.kind === "codex" && job.status === "ready" && job.file) {
+        const base = String(view.media || "").replace(/\/$/, "");
+        if (/^https?:\/\//i.test(base)) {
+          const a = document.createElement("a");
+          a.className = "q-play";
+          a.href = base + "/play/" + job.file.split("/").map(encodeURIComponent).join("/");
+          a.target = "_blank";
+          a.rel = "noopener";
+          a.textContent = "打开玩";
+          li.appendChild(a);
+        }
       }
       if (job.text) {
         const note = document.createElement("div");

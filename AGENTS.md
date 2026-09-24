@@ -135,7 +135,7 @@ LLM 输出约定：planner / desk 文本都走严格 JSON（`note` 或 `text`）
 2. `judge.JudgeTurn` 一次 Jev：情感 / 投入 / 安全 / 人设贴合 / **`act` 总入口**。`need_llm` 仍在同一次请求里，只给 plan 的强度。
 3. `judge.DecideMode` 选 mode；`steering.Build` 拼 guidance；可选叠 `sense.Felt`。
 4. `sess.Steer` → developer。同一帧 `avatar.Drive` 把 **steering mode + 本轮情感** 映射成 Haru 表情，不把用户的脸当输入。
-5. 仅 final，且本轮判断成功：按 `act` 打开一条支线。跟进、纠正、`act=none` 折进同一条目标，对话继续，工作也继续。同一条支线里再问 `branch_done`；这题过阈值才按完成收束。Jev 明确选了另一个动作码时立刻跳出：停掉当前支线（含正在跑的请求），再启动新的。`computer_use` 的每一步操作仍由内层 Jev 选。`reflect` / `look` / `codex` 走自我 ReAct（`internal/react`）：内层 Jev 每步只选 notice / read / remember / change / done，完成不由内层宣布。`safety` 或刚打开时置信度过低则不动手，这时不跳出。同一时间只跑一个动手任务。
+5. 仅 final，且本轮判断成功：按 `act` 打开一条支线。跟进、纠正、`act=none` 折进同一条目标，对话继续，工作也继续。同一条支线里再问 `branch_done`；这题过阈值才按完成收束。Jev 明确选了另一个动作码时立刻跳出：停掉当前支线（含正在跑的请求），再启动新的。`computer_use` 的每一步操作仍由内层 Jev 选。`codex` 分两种：写一个新程序（“用 Codex 写个贪吃蛇”）进 stage 队列，在 `runs/codex/<时间>` 空目录里写，不读她的源码；只有“改你自己”才进自我 ReAct。`reflect` / `look` / 改自己的 `codex` 走自我 ReAct（`internal/react`）：内层 Jev 每步只选 notice / read / remember / change / done，完成不由内层宣布。`safety` 或刚打开时置信度过低则不动手，这时不跳出。同一时间只跑一个动手任务。
 6. `/desk`、`/codex`、`/look` 仍是操作者手动入口。`/codex` 会跳过外层 Jev。语音热路径不走这条。
 
 ---

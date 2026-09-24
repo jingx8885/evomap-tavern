@@ -16,7 +16,7 @@ func TestCodexJobWritesInItsOwnDir(t *testing.T) {
 		gotCwd, gotPrompt = cwd, prompt
 		return "done\nwrote main.py", os.WriteFile(filepath.Join(cwd, "main.py"), []byte("print(1)\n"), 0o644)
 	}
-	text, err := runCodexJob(context.Background(), root, "写一个猜数字小游戏", fake, func(string, float64) {})
+	file, text, err := runCodexJob(context.Background(), root, "写一个猜数字小游戏", fake, func(string, float64) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,6 +29,24 @@ func TestCodexJobWritesInItsOwnDir(t *testing.T) {
 	}
 	if !strings.Contains(text, "main.py") || !strings.Contains(text, gotCwd) {
 		t.Fatalf("summary = %q", text)
+	}
+	if file != "" {
+		t.Fatalf("no html, no page to play: %q", file)
+	}
+}
+
+func TestCodexJobNamesItsPage(t *testing.T) {
+	var gotCwd string
+	fake := func(_ context.Context, cwd, _ string) (string, error) {
+		gotCwd = cwd
+		return "ok", os.WriteFile(filepath.Join(cwd, "snake.html"), []byte("<canvas></canvas>"), 0o644)
+	}
+	file, _, err := runCodexJob(context.Background(), t.TempDir(), "贪吃蛇", fake, func(string, float64) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file != filepath.Base(gotCwd)+"/snake.html" {
+		t.Fatalf("file = %q", file)
 	}
 }
 
@@ -46,10 +64,10 @@ func TestCodexJobFailureIsAnError(t *testing.T) {
 	fake := func(context.Context, string, string) (string, error) {
 		return "boom", errors.New("codex exec: exit 1")
 	}
-	if _, err := runCodexJob(context.Background(), t.TempDir(), "x", fake, func(string, float64) {}); err == nil {
+	if _, _, err := runCodexJob(context.Background(), t.TempDir(), "x", fake, func(string, float64) {}); err == nil {
 		t.Fatal("failed codex run reported success")
 	}
-	if _, err := runCodexJob(context.Background(), t.TempDir(), "x", nil, func(string, float64) {}); err == nil {
+	if _, _, err := runCodexJob(context.Background(), t.TempDir(), "x", nil, func(string, float64) {}); err == nil {
 		t.Fatal("missing codex reported success")
 	}
 }

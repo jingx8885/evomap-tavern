@@ -663,6 +663,8 @@ func (s *Stage) Glance(open bool) string {
 		}
 	case feat.Status == StatusReady && feat.Kind == KindVideo && feat.File != "":
 		b.WriteString("A video player fills the frame. ")
+	case feat.Status == StatusReady && feat.Kind == KindCodex && feat.File != "":
+		b.WriteString("The page Codex wrote runs live in the frame; they can play or use it there. ")
 	case feat.Status == StatusReady && (feat.Kind == KindSpeech || feat.Kind == KindSong) && feat.File != "":
 		b.WriteString("An audio player sits in the frame. ")
 	case feat.Status == StatusReady && feat.Text != "":
