@@ -586,6 +586,25 @@ func TestLookFallbackSaysWhatTheEyeDid(t *testing.T) {
 	}
 }
 
+func TestLogHandoffCarriesTheJournal(t *testing.T) {
+	opt, slot, _ := routeRig(t, nil)
+	opt.sense.Note("[branch] open codex")
+	opt.sense.Note("[window] open http://127.0.0.1:1")
+	got := senseReply(opt, routePersona(), "嗯嗯你能看到你的日志吗")
+	if !strings.Contains(got, "Process log") || !strings.Contains(got, "open codex") {
+		t.Fatalf("log reply = %q", got)
+	}
+	if senseReply(opt, routePersona(), "你好") != "" {
+		t.Fatal("ordinary chat must stay on the empty fallback")
+	}
+	if senseReply(opt, routePersona(), "看看屏幕") != "" {
+		t.Fatal("a look still waits on the eye")
+	}
+	if handoffFallback(opt, slot) != delegAck {
+		t.Fatal("an idle branch still says nothing ran")
+	}
+}
+
 func TestHandoffFallbackSaysWhatIsTrue(t *testing.T) {
 	opt, slot, release := routeRig(t, nil)
 	defer release()

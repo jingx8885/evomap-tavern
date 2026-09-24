@@ -1220,11 +1220,23 @@ func dispatchCapability(ctx context.Context, opt Options, p *persona.Persona,
 	}
 	// A turn she handed over gets an answer even when no work line comes:
 	// at once when nothing starts, after a short grace on a follow-up.
+	// A question she can already feel (her log, her body, the stage) is
+	// that answer. The empty "nothing ran" line is only for everything else.
 	handoff := opt.voice.handoffTurn(userText)
 	settle := func(wait time.Duration) {
-		if handoff {
-			awaitHandoff(opt, sess, slot, opt.voice.delegation(), wait)
+		if !handoff {
+			return
 		}
+		id := opt.voice.delegation()
+		if wait == 0 {
+			if line := senseReply(opt, p, userText); line != "" {
+				voiceAnswer(opt, sess, id, "commentary", livevoice.FitTail(line))
+				if !opt.voice.unanswered(id) {
+					return
+				}
+			}
+		}
+		awaitHandoff(opt, sess, slot, id, wait)
 	}
 	if done {
 		opt.log("[branch] done %s", orDash(open.Kind))
@@ -1886,6 +1898,22 @@ func awaitHandoff(opt Options, sess *livevoice.Session, slot *capabilitySlot, id
 		opt.log("[answer] fallback after %s", wait)
 		voiceAnswer(opt, sess, id, "commentary", handoffFallback(opt, slot))
 	})
+}
+
+// senseReply is a handoff answer already in hand: the journal, her body,
+// or the stage. A look still waits on the eye, so camera, screen, and shot
+// stay out of this.
+func senseReply(opt Options, p *persona.Persona, userText string) string {
+	if opt.sense == nil || p == nil {
+		return ""
+	}
+	ask := sense.ParseAsk(userText)
+	switch ask.Kind {
+	case sense.AskLog, sense.AskBody, sense.AskExistence, sense.AskCode, sense.AskFile, sense.AskWindow:
+	default:
+		return ""
+	}
+	return strings.TrimSpace(opt.sense.Felt(p, ask, ""))
 }
 
 // handoffFallback is what she can truthfully say when no work line came:
